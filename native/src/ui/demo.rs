@@ -50,7 +50,7 @@ fn conv(title: &str, ws: Option<&str>, ago_min: i64) -> ConversationSummary {
 
 const DEMO_APP: &str = r"C:\work\demo-app";
 const API: &str = r"C:\work\api-server";
-const NOTES: &str = r"C:\work\ghi-chu";
+const NOTES: &str = r"C:\work\notes";
 
 fn base() -> UiState {
     let mut s = UiState { auth: AuthStatus::LoggedIn { email: Some("user@example.com".into()) }, ..Default::default() };
@@ -60,18 +60,18 @@ fn base() -> UiState {
     s.oauth_source = Some(crate::auth::ClientSource::Env);
     let day = 60 * 24;
     s.conversations = vec![
-        conv("Sửa lỗi mã hóa tiếng Việt khi xuất CSV", Some(DEMO_APP), 4),
+        conv("Fix Vietnamese names garbled in the CSV export", Some(DEMO_APP), 4),
         conv("Add retry to the upload client", Some(DEMO_APP), 3 * 60),
-        conv("Thêm chế độ tối cho trang cài đặt", Some(DEMO_APP), 26 * 60),
+        conv("Add dark mode to the settings page", Some(DEMO_APP), 26 * 60),
         conv("Untitled Conversation", Some(DEMO_APP), 2 * day),
         conv("Refactor the image cache", Some(DEMO_APP), 6 * day),
         conv("Write unit tests for the parser", Some(API), 40),
-        conv("Tối ưu truy vấn danh sách đơn hàng", Some(API), 5 * 60),
+        conv("Speed up the order list query", Some(API), 5 * 60),
         conv("Update deploy script", Some(API), 9 * day),
         conv("Migrate config to TOML", Some(API), 150 * day),
-        conv("Tóm tắt biên bản họp tuần", Some(NOTES), 25 * day),
+        conv("Summarize the weekly meeting notes", Some(NOTES), 25 * day),
         conv("Draft release notes for v2.3", Some(NOTES), 40 * day),
-        conv("Câu hỏi nhanh về regex", None, 70 * day),
+        conv("Quick regex question", None, 70 * day),
     ];
     signed_in_accounts(&mut s);
     s
@@ -213,7 +213,7 @@ fn providers_state(s: &mut UiState) {
 
 fn conversation_items() -> Vec<ChatItem> {
     vec![
-        ChatItem::User(r#"Script xuất CSV ghi tiếng Việt bị lỗi font (ví dụ "Nguyá»…n"). Can you fix the encoding?"#.into()),
+        ChatItem::User(r#"The CSV export garbles Vietnamese names ("Nguyá»…n" instead of "Nguyễn"). Can you fix the encoding?"#.into()),
         ChatItem::TurnHeader { duration: Some(Duration::from_secs(62)) },
         ChatItem::Thought {
             subject: Some("Inspecting the export script".into()),
@@ -251,10 +251,10 @@ fn conversation_items() -> Vec<ChatItem> {
 fn turn_error_items() -> Vec<ChatItem> {
     let read = |id: &str, path: &str, lines: &str| tool_card(id, "read_file", serde_json::json!({"file_path": path}), Some((true, lines)));
     vec![
-        ChatItem::User("Xin chào bro".into()),
+        ChatItem::User("Hey there".into()),
         ChatItem::TurnHeader { duration: Some(Duration::from_secs(3)) },
-        ChatItem::Assistant("Chào bạn! Hôm nay mình giúp gì cho dự án?".into()),
-        ChatItem::User("Dự án của tôi đang làm gì".into()),
+        ChatItem::Assistant("Hi! How can I help with your project today?".into()),
+        ChatItem::User("What does my project do?".into()),
         ChatItem::TurnHeader { duration: Some(Duration::from_secs(4)) },
         ChatItem::Thought {
             subject: Some("Exploring the project".into()),
@@ -274,10 +274,10 @@ fn progress_items() -> Vec<ChatItem> {
     let list = |id: &str, dir: &str, n: &str| tool_card(id, "list_directory", serde_json::json!({"dir_path": dir}), Some((true, n)));
     let read = |id: &str, path: &str, n: &str| tool_card(id, "read_file", serde_json::json!({"file_path": path}), Some((true, n)));
     vec![
-        ChatItem::User("Xin chào".into()),
+        ChatItem::User("Hello".into()),
         ChatItem::TurnHeader { duration: Some(Duration::from_secs(3)) },
-        ChatItem::Assistant("Xin chào! Mình có thể giúp gì cho dự án của bạn?".into()),
-        ChatItem::User("Dự án của tôi đang làm gì".into()),
+        ChatItem::Assistant("Hello! How can I help with your project?".into()),
+        ChatItem::User("What does my project do?".into()),
         ChatItem::TurnHeader { duration: Some(Duration::from_secs(38)) },
         list("1", ".", "14 entries"),
         list("2", "scripts", "6 entries"),
@@ -291,21 +291,21 @@ fn progress_items() -> Vec<ChatItem> {
     ]
 }
 
-const PROGRESS_REPLY: &str = r#"Dự án là một công cụ nhỏ để **xuất và nhập đơn hàng** dưới dạng CSV.
+const PROGRESS_REPLY: &str = r#"The project is a small tool that **exports and imports orders** as CSV.
 
-## Thành phần chính
+## Main parts
 
-1. `scripts/export.py`: đọc đơn hàng từ SQLite và ghi CSV cho Excel (UTF-8 có BOM).
-2. `scripts/import_orders.py`: đọc lại CSV, kiểm tra từng dòng rồi ghi vào cơ sở dữ liệu.
-3. `web/`: trang quản trị nhỏ để xem đơn hàng và tải file xuất.
+1. `scripts/export.py`: reads orders from SQLite and writes a CSV for Excel (UTF-8 with BOM).
+2. `scripts/import_orders.py`: reads the CSV back, checks every row, then writes it to the database.
+3. `web/`: a small admin page to browse orders and download the export.
 
-## Kiểm thử
+## Tests
 
-`pytest` chạy 12 test, tất cả đều qua.
+`pytest` runs 12 tests, and they all pass.
 
-Bạn muốn tìm hiểu kỹ phần nào?"#;
+Which part would you like to look at more closely?"#;
 
-const ASSISTANT_REPLY: &str = r#"Nguyên nhân: file được mở **không chỉ định encoding**, nên Windows dùng `cp1252`.
+const ASSISTANT_REPLY: &str = r#"Cause: the file is opened **without an explicit encoding**, so Windows falls back to `cp1252`.
 
 Changes:
 
@@ -356,7 +356,7 @@ const DEMO_DELETE_COMMAND: &str = "Remove-Item -Recurse -Force build, dist";
 /// A live turn: a finished thought and its tool call, then the thought being reasoned now.
 fn thinking_items() -> Vec<ChatItem> {
     vec![
-        ChatItem::User("Dọn thư mục build cũ giúp tôi".into()),
+        ChatItem::User("Clean up the old build folders".into()),
         ChatItem::TurnHeader { duration: None },
         ChatItem::Thought { subject: Some("Looking for build output".into()), text: DEMO_DONE_THOUGHT.into() },
         tool_card("1", "list_directory", serde_json::json!({"dir_path": "."}), Some((true, "12 entries"))),
@@ -454,7 +454,7 @@ pub fn state(name: &str) -> Option<UiState> {
         }
         "turn-start" => {
             // The moment after a first prompt: the turn has its header and nothing else yet.
-            s.items = vec![ChatItem::User("Xin chào".into()), ChatItem::TurnHeader { duration: None }];
+            s.items = vec![ChatItem::User("Hello".into()), ChatItem::TurnHeader { duration: None }];
             s.busy = true;
         }
         "thinking" | "confirm-delete" => {
@@ -474,7 +474,7 @@ pub fn state(name: &str) -> Option<UiState> {
         "turn-error" => {
             // A turn the provider refused once its tools had run. The error sits on the composer,
             // where it is seen however long the turn was.
-            s.conversations.insert(0, conv("Dự án của tôi đang làm gì", Some(DEMO_APP), 1));
+            s.conversations.insert(0, conv("What does my project do?", Some(DEMO_APP), 1));
             let c = &s.conversations[0];
             s.current = Some(c.id);
             s.current_title = c.title.clone();
@@ -484,7 +484,7 @@ pub fn state(name: &str) -> Option<UiState> {
         "progress" => {
             // That question answered after eight steps, with the Progress panel opened from the
             // toolbar.
-            s.conversations.insert(0, conv("Dự án của tôi đang làm gì", Some(DEMO_APP), 1));
+            s.conversations.insert(0, conv("What does my project do?", Some(DEMO_APP), 1));
             let c = &s.conversations[0];
             s.current = Some(c.id);
             s.current_title = c.title.clone();
@@ -691,7 +691,7 @@ const DEMO_PLAN_V1_MD: &str = "# Implementation Plan: retry uploads\n\n## Goal\n
 fn planning_items() -> Vec<ChatItem> {
     use crate::agent::orchestrate::{REQUEST_REVIEW, WRITE_ARTIFACT};
     vec![
-        ChatItem::User("Add retry with backoff to the upload client. Không đổi API public nhé.".into()),
+        ChatItem::User("Add retry with backoff to the upload client. Keep the public API unchanged.".into()),
         ChatItem::TurnHeader { duration: None },
         boundary("p1", "Research the upload client", "Reading the client and its callers", "planning"),
         tool_card("1", "read_file", serde_json::json!({"file_path": "src/upload/client.rs"}), Some((true, "Read 214 lines"))),
@@ -715,7 +715,7 @@ fn review_items() -> Vec<ChatItem> {
     use crate::agent::orchestrate::{REQUEST_REVIEW, WRITE_ARTIFACT};
     let task = DEMO_TASK_MD.replace("[/]", "[ ]").replace("- [x] Write", "- [/] Write");
     vec![
-        ChatItem::User("Add retry with backoff to the upload client. Không đổi API public nhé.".into()),
+        ChatItem::User("Add retry with backoff to the upload client. Keep the public API unchanged.".into()),
         ChatItem::TurnHeader { duration: None },
         boundary("p1", "Research the upload client", "Reading the client and its callers", "planning"),
         tool_card("1", "read_file", serde_json::json!({"file_path": "src/upload/client.rs"}), Some((true, "Read 214 lines"))),

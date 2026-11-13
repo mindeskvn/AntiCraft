@@ -1154,7 +1154,7 @@ mod tests {
 
     /// A turn that has only just started: the prompt and its live header.
     fn started() -> Vec<ChatItem> {
-        vec![ChatItem::User("Xin chào".into()), ChatItem::TurnHeader { duration: None }]
+        vec![ChatItem::User("Hello".into()), ChatItem::TurnHeader { duration: None }]
     }
 
     /// A running turn says so once, on its header. A "Thinking..." row under it repeated
