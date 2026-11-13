@@ -1,5 +1,19 @@
 # AntiCraft
 
+<!-- updates:start (push_github tự tạo mục này từ push_github/version.json, đừng sửa tay) -->
+## Các bản cập nhật
+
+### v0.9.6 (13/11/2026) · bản mới nhất
+[Tải AntiCraft.zip](https://github.com/mindeskvn/AntiCraft/releases/download/v0.9.6/AntiCraft.zip) · [Trang Release](https://github.com/mindeskvn/AntiCraft/releases/tag/v0.9.6)
+
+- Bản phát hành đầu tiên trên GitHub (Windows 10/11, 64-bit).
+- Mọi lệnh xóa file luôn chờ bạn duyệt và có cảnh báo đỏ: ghi đè file bằng nội dung rỗng, và cả lệnh shell (rm, del, Remove-Item, git rm/clean...), kể cả khi chạy với --dangerously-skip-permissions.
+- Quay lại (rewind) lịch sử hội thoại về trước một tin nhắn bất kỳ; tự sao lưu ẩn hội thoại mỗi lần lưu.
+- Chế độ Turbo hiểu đúng dấu nháy trong lệnh PowerShell, không hỏi lại các lệnh như python -c "...".
+- Giao diện: phần suy nghĩ đang chạy được mở, xong thì tự thu gọn; dòng tool call và Thinking nhỏ và mờ hơn chữ trả lời.
+
+<!-- updates:end -->
+
 This repository holds two Windows programs:
 
 | Folder | Program | What it is |
