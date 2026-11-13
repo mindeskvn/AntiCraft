@@ -1,0 +1,54 @@
+[package]
+name = "anticraft-native"
+version = "0.9.6"
+edition = "2021"
+description = "AntiCraft native desktop coding agent (Rust, egui) for Google Code Assist"
+license = "Apache-2.0"
+publish = false
+
+[[bin]]
+name = "anticraft-native"
+path = "src/main.rs"
+
+[dependencies]
+eframe = "=0.37.0"
+egui = "=0.37.0"
+egui_extras = "=0.37.0"
+egui_commonmark = "=0.26.0"
+png = "=0.18.1"
+tokio = { version = "=1.54.1", features = ["full"] }
+tokio-util = "=0.7.20"
+# reqwest 0.12 rustls-tls uses the ring provider (no cmake/nasm needed on MSVC).
+reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls", "json", "stream", "http2"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
+futures = "=0.3.34"
+tokio-stream = "=0.1.19"
+async-stream = "=0.3.6"
+rand = "=0.9.2"
+sha2 = "=0.10.9"
+base64 = "=0.22.1"
+url = "=2.5.8"
+open = "=5.3.2"
+rfd = "=0.17.2"
+regex = "=1.13.1"
+rhai = "=1.27.0"
+globset = "=0.4.16"
+walkdir = "=2.5.0"
+dunce = "=1.0.5"
+similar = "=2.7.0"
+uuid = { version = "=1.29.0", features = ["v4", "serde"] }
+chrono = { version = "=0.4.45", features = ["serde"] }
+dirs = "=6.0.0"
+thiserror = "=2.0.21"
+anyhow = "=1.0.104"
+tracing = "=0.1.44"
+tracing-subscriber = { version = "=0.3.23", features = ["env-filter", "fmt"] }
+tracing-appender = "=0.2.5"
+
+[dev-dependencies]
+axum = "=0.8.9"
+tempfile = "=3.27.0"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_JobObjects", "Win32_System_Threading"] }

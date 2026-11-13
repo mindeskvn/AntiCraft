@@ -1,0 +1,61 @@
+[package]
+name = "anticraft"
+version = "0.1.0"
+edition = "2021"
+description = "Clean-room Rust desktop shell interoperable with the Antigravity language server"
+license = "MIT"
+
+[[bin]]
+name = "anticraft"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "=1.0.104"
+thiserror = "=2.0.21"
+tokio = { version = "=1.54.1", features = ["rt-multi-thread", "macros", "process", "io-util", "io-std", "sync", "time", "fs", "net", "signal"] }
+tao = "=0.37.2"
+wry = "=0.57.1"
+muda = "=0.21.2"
+tray-icon = "=0.26.1"
+rfd = "=0.17.2"
+reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls", "stream", "http2"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
+serde_yaml = "=0.9.34"
+semver = "=1.0.28"
+sha2 = "=0.11.1"
+base64 = "=0.23.1"
+subtle = "=2.6.1"
+rand = "=0.9.2"
+uuid = { version = "=1.29.0", features = ["v4"] }
+regex = "=1.13.1"
+axum = { version = "=0.8.9", default-features = false, features = ["http1", "tokio"] }
+hyper = { version = "=1.12.0", features = ["server", "http1"] }
+clap = { version = "=4.6.7", features = ["derive"] }
+tracing = "=0.1.44"
+tracing-subscriber = { version = "=0.3.23", features = ["fmt", "env-filter"] }
+tracing-appender = "=0.2.5"
+url = "=2.5.8"
+notify-rust = "=4.18.2"
+webview2-com = "=0.39.1"
+windows-core = "=0.62.2"
+windows-sys = { version = "=0.61.2", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Security_Cryptography",
+  "Win32_Security_WinTrust",
+  "Win32_System_Power",
+  "Win32_System_Com",
+  "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_JobObjects",
+  "Win32_System_Threading",
+  "Win32_System_Registry",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Pipes",
+  "Win32_System_IO",
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_UI_Shell",
+] }
+
+[dev-dependencies]
+tempfile = "=3.27.0"

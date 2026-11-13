@@ -1,0 +1,33 @@
+# ---- Build output (every crate) ----
+target/
+
+# ---- Release tooling: token, zip and scripts stay on this machine ----
+/push_github/
+
+# ---- Scratch work and internal notes ----
+/_scratch_mcp/
+/native/.design/
+/native/add_helper.py
+/target-shot.log
+
+# ---- Logs, caches, editor and OS files ----
+*.log
+*.tmp
+__pycache__/
+*.py[co]
+.vscode/
+.idea/
+.claude/
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# ---- Secrets: never commit ----
+github_token.txt
+*.local.env
+*.pem
+*.pfx
+.env
+.env.*
+oauth_creds.json
+oauth_client.json
