@@ -460,6 +460,7 @@ pub fn state(name: &str) -> Option<UiState> {
         "thinking" | "confirm-delete" => {
             // "thinking": the thought being reasoned is open, the finished one above it is
             // only its row. "confirm-delete": the same turn once the model asks to delete.
+            s.conversations.insert(0, conv("Clean up the old build folders", Some(DEMO_APP), 1));
             let c = &s.conversations[0];
             s.current = Some(c.id);
             s.current_title = c.title.clone();

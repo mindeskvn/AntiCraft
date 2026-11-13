@@ -31,9 +31,11 @@ Precedence: saved file, then run-time env, then build-time value. The value is n
 ## Demo and screenshots
 Fixture data only, no sign-in, no network:
 ```
-anticraft-native.exe --demo home|conversation|model-menu|history|customizations|login|accounts|accounts-models [--screenshot OUT.png]
+anticraft-native.exe --demo <screen> [--screenshot OUT.png] [--window-size WxH]
 ```
-With `--screenshot` the app saves a PNG and exits. Current renders are in `target\shots\`.
+Screens: `home`, `conversation`, `turn-start`, `turn-error`, `progress`, `planning`, `review`, `model-menu`, `history`, `customizations`, `login`, `accounts`, `accounts-models`, `providers`, `provider-add`, `provider-dialog`, `provider-menu`, `bypass`, `bypass-chat`, `thinking`, `confirm-delete`.
+
+With `--screenshot` the app saves a PNG and exits. The pictures in the repository's main README are in `docs/screenshots/` and come from these screens.
 
 ## First login
 "Sign in" in the sidebar and on Home is the **Antigravity** sign-in. It uses Antigravity's own OAuth client and needs no client secret.

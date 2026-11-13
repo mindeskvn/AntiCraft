@@ -14,6 +14,72 @@
 
 <!-- updates:end -->
 
+## AntiCraft native at a glance
+
+These pictures come from the app's built-in demo screens, which use sample data (`anticraft-native.exe --demo <screen> --screenshot <file>.png`).
+
+### Start in your project
+
+![Home screen: the project picker, the request box with its mode and model chips, and conversations grouped by project](docs/screenshots/home.png)
+
+Pick the project folder above the request box and describe the task. Type `@` to mention a file or folder and `/` to start a workflow; the chips under the box set the mode (here Planning) and the model. The sidebar groups your conversations by project. The agent works only inside the selected folder: reads run on their own, file edits show a diff, and shell commands ask before they run.
+
+### Work through a real task
+
+![A conversation: the agent reads, searches and runs a check, explains the cause, and proposes an edit as a diff](docs/screenshots/conversation.png)
+
+The agent reads files, searches the code and runs commands. Each step is a quiet one-line row, so the answer stays easy to read. A change to a file arrives as a diff right in the conversation: approve or reject it from the composer (Enter or Esc), or allow that tool for the rest of the session.
+
+### Follow the reasoning
+
+![A running turn: the thought being reasoned is open, the earlier one is folded to its title](docs/screenshots/thinking.png)
+
+The thought the model is working on stays open while it runs, then folds into one row as soon as a tool call or the answer follows. Click a row to read it again.
+
+### Deletions always wait for you
+
+![A command that deletes folders, waiting for approval with a red warning and no "Always allow"](docs/screenshots/confirm-delete.png)
+
+A command that deletes files (`rm`, `del`, `Remove-Item`, `git rm`, `git clean`...) or a write that would empty a file is never approved automatically: not in Turbo mode, not by an allow rule, not even with `--dangerously-skip-permissions`. The card says so in red, and "Always allow" is not offered.
+
+### Plans and progress for bigger tasks
+
+![Planning mode: tasks with their phase, status, updates and files, and the Progress panel](docs/screenshots/planning.png)
+
+In Planning mode the agent splits the work into tasks. Each task shows its phase, its status, its latest updates and the files it touched, and the Progress panel follows the whole turn. You can queue a follow-up while it works, or press Alt+Enter to steer the running turn.
+
+### Review the plan before any code changes
+
+![The Artifacts panel with the task list and the implementation plan waiting for review](docs/screenshots/review.png)
+
+Before it edits code, the agent writes a task list and an implementation plan. The Artifacts panel keeps every version (v1, v2) and holds the plan for your review: comment on it, request changes, or press Proceed.
+
+### Every model in one menu
+
+![The model menu, grouped by signed-in account](docs/screenshots/model-menu.png)
+
+The model menu lists the models of every signed-in account (Antigravity, ChatGPT Codex, Claude Code) and of your API-key providers. The choice applies from the next message.
+
+### Sign in with your subscriptions
+
+![Customizations > Account: three subscription accounts, and the models one of them serves](docs/screenshots/accounts-models.png)
+
+Customizations > Account signs in to Antigravity, ChatGPT (Codex) and Claude Code. Each account shows which models it actually serves, and is put in use or signed out on its own row. When something goes wrong, the row says what happened and offers a way out, such as pasting the redirect link when the callback port is busy. These are consumer subscriptions: a provider may restrict third-party clients, and using them this way may break its terms.
+
+### Or bring your own API keys
+
+![The provider dialog: an Anthropic endpoint with its models loaded](docs/screenshots/provider-dialog.png)
+
+Add Gemini Developer API, OpenAI-compatible or Anthropic endpoints with an API key, load the models the endpoint serves, and pick one.
+
+### Pick up where you left off
+
+![Conversation History: every conversation with its project and age, and a search box](docs/screenshots/history.png)
+
+Conversations are saved on your computer. Conversation History lists them with their project and age, and searches them; open one to continue.
+
+## What is in this repository
+
 This repository holds two Windows programs:
 
 | Folder | Program | What it is |
