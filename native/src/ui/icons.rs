@@ -48,7 +48,6 @@ pub const DOTS_THREE_VERTICAL: &str = "\u{E208}";
 pub const FOLDER_PLUS: &str = "\u{E258}";
 pub const GIT_BRANCH: &str = "\u{E280}";
 pub const HAND: &str = "\u{E298}";
-pub const SHIELD: &str = "\u{E40A}";
 pub const SHIELD_CHECK: &str = "\u{E40C}";
 pub const TEXT_T: &str = "\u{E48A}";
 pub const ARROWS_LEFT_RIGHT: &str = "\u{E0A0}";

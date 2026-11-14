@@ -66,7 +66,7 @@ pub enum ArtifactReviewPolicy {
 pub enum TerminalPolicy {
     /// Always ask, except allowlisted commands.
     #[default]
-    #[serde(alias = "Off", alias = "require-review", alias = "request-review", alias = "strict")]
+    #[serde(alias = "Off", alias = "manual", alias = "Manual", alias = "require-review", alias = "request-review", alias = "strict")]
     Off,
     /// Run known read-only / safe simple commands without asking; everything else asks.
     #[serde(alias = "Auto", alias = "proceed-in-sandbox")]
@@ -75,6 +75,87 @@ pub enum TerminalPolicy {
     /// allowed).
     #[serde(alias = "Turbo", alias = "always-proceed")]
     Turbo,
+}
+
+/// The one permission mode the message box offers (DESIGN.md 2.6).
+///
+/// A view over four settings that stay the source of truth — [`AgentMode`],
+/// `Settings::auto_approve_edits`, [`TerminalPolicy`] and `Settings::skip_permissions` — so no
+/// new stored field exists and a settings file written before the chip still loads. Each value
+/// is one of the combinations a person picks, in the order the chip lists them:
+/// Manual, Edit Auto, Plan, Auto, Bypass.
+///
+/// `Bypass` is the chip's name for `--dangerously-skip-permissions`: deletions, denylisted
+/// commands and MCP tools still ask or are refused (those checks sit above the flag in
+/// [`ApprovalPolicy::decide`]). It is never written to disk, because `skip_permissions` carries
+/// `#[serde(skip)]`; a save stores Auto's fields, so a restart comes back on Auto.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionMode {
+    /// Every edit, command and other tool call waits for approval. Reads, searches and allowlisted
+    /// commands still run when their settings allow it.
+    #[default]
+    #[serde(alias = "Manual")]
+    Manual,
+    /// File edits apply on their own; commands still ask.
+    #[serde(alias = "EditAuto")]
+    EditAuto,
+    /// Planning mode: research, write a plan for review, then build (edits and commands ask).
+    #[serde(alias = "Plan")]
+    Plan,
+    /// Read-only and build commands run on their own and edits apply; everything else asks.
+    #[serde(alias = "Auto")]
+    Auto,
+    /// `--dangerously-skip-permissions`: every tool call runs without asking, except file
+    /// deletions, denylisted commands and MCP tools.
+    #[serde(alias = "Bypass")]
+    Bypass,
+}
+
+impl PermissionMode {
+    /// Conversation mode this permission mode runs in ([`PermissionMode::Plan`] is the only
+    /// Planning one).
+    pub fn agent_mode(self) -> AgentMode {
+        match self {
+            PermissionMode::Plan => AgentMode::Planning,
+            PermissionMode::Manual | PermissionMode::EditAuto | PermissionMode::Auto | PermissionMode::Bypass => AgentMode::Fast,
+        }
+    }
+
+    /// Whether `write_file` / `replace` apply without asking; the diff and hash pinning stay.
+    pub fn auto_approve_edits(self) -> bool {
+        match self {
+            PermissionMode::Manual | PermissionMode::Plan => false,
+            PermissionMode::EditAuto | PermissionMode::Auto | PermissionMode::Bypass => true,
+        }
+    }
+
+    /// How shell commands run: `Manual` and `EditAuto` and `Plan` ask, `Auto` runs the safe set,
+    /// `Bypass` runs everything not denylisted.
+    pub fn terminal(self) -> TerminalPolicy {
+        match self {
+            PermissionMode::Manual | PermissionMode::EditAuto | PermissionMode::Plan => TerminalPolicy::Off,
+            PermissionMode::Auto => TerminalPolicy::Auto,
+            PermissionMode::Bypass => TerminalPolicy::Turbo,
+        }
+    }
+
+    /// Whether `read_file`, `list_directory`, `glob` and `grep_search` run without asking.
+    ///
+    /// `Manual` and `Plan` promise that calls wait, so they turn reads off too; the other three
+    /// leave the Settings toggle ("Auto-approve read and search tools") to decide. A conversation
+    /// that picked no mode is not overridden at all and follows the toggle.
+    pub fn auto_approve_read_tools(self) -> bool {
+        match self {
+            PermissionMode::Manual | PermissionMode::Plan => false,
+            PermissionMode::EditAuto | PermissionMode::Auto | PermissionMode::Bypass => true,
+        }
+    }
+
+    /// Whether every call is auto-approved. Only `Bypass`.
+    pub fn skip_permissions(self) -> bool {
+        matches!(self, PermissionMode::Bypass)
+    }
 }
 
 /// Outcome of a policy check.

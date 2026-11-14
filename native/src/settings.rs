@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::agent::plugins::PluginChoice;
-pub use crate::agent::policy::{AgentMode, ArtifactReviewPolicy, TerminalPolicy};
+pub use crate::agent::policy::{AgentMode, ArtifactReviewPolicy, PermissionMode, TerminalPolicy};
 use crate::agent::policy::{validate_rule, ApprovalPolicy, MAX_RULES};
 use crate::auth::external::{self, AccountProvider};
 use crate::providers::{ProviderKind, ProviderProfile};
@@ -534,7 +534,12 @@ impl Default for Settings {
             latest_flash_ga: false,
             auto_approve_edits: false,
             skip_permissions: false,
-            agent_mode: AgentMode::default(),
+            // A new install starts on Manual (DESIGN.md 2.6): read and search tools still run
+            // on their own (`auto_approve_read_tools` above), but every edit shows a diff and
+            // every command asks. `AgentMode::default()` stays Planning for the code that
+            // needs "the planning variant"; the settings default is the one the first chip
+            // reads, and Manual is Fast.
+            agent_mode: AgentMode::Fast,
             artifact_review: ArtifactReviewPolicy::default(),
             terminal_policy: TerminalPolicy::default(),
             terminal_allowlist: Vec::new(),
@@ -681,8 +686,62 @@ impl Settings {
         }
     }
 
+    /// The permission mode the message box chip shows, derived from the four policy fields.
+    ///
+    /// `Turbo` without `skip_permissions` is not one of the five modes; it reads as
+    /// [`PermissionMode::Auto`], so the chip never claims less than the policy does (a bare
+    /// Turbo runs everything the denylist allows, which is Auto's floor with edits). [`Self::load`]
+    /// already normalizes that state to `Auto`; a struct built in memory is the only way to get
+    /// here. A `Planning` conversation with a permissive terminal or edits reads as
+    /// [`PermissionMode::Auto`], not Plan: the chip must never name a stricter mode than the
+    /// policy in force (Plan's promise is that commands and edits ask). `artifact_review` is a
+    /// separate setting and does not change the mode.
+    pub fn permission_mode(&self) -> PermissionMode {
+        self.permission_mode_for(self.agent_mode)
+    }
+
+    /// [`Self::permission_mode`] for a conversation whose agent mode may differ from the
+    /// default (`/fast` or a model-chip pick on a conversation that never picked a mode).
+    /// The terminal, edit and skip fields still come from this `Settings`, which is where the
+    /// backend's policy reads them too.
+    pub fn permission_mode_for(&self, agent_mode: AgentMode) -> PermissionMode {
+        match (self.skip_permissions, agent_mode, self.terminal_policy, self.auto_approve_edits) {
+            (true, ..) => PermissionMode::Bypass,
+            (false, AgentMode::Planning, TerminalPolicy::Off, false) => PermissionMode::Plan,
+            // Turbo is Auto's floor plus edits, so it is never reported as the milder
+            // EditAuto or Manual. Auto without edits runs commands by itself with no edit
+            // auto-apply, which no mode names; Auto describes it without overstating the rest.
+            // A Planning conversation lands here too when its terminal or edits are permissive.
+            (false, _, TerminalPolicy::Turbo | TerminalPolicy::Auto, _) => PermissionMode::Auto,
+            (false, _, TerminalPolicy::Off, true) => PermissionMode::EditAuto,
+            (false, _, TerminalPolicy::Off, false) => PermissionMode::Manual,
+        }
+    }
+
+    /// Write the four policy fields of `m`.
+    ///
+    /// Bypass is stored as Auto plus `skip_permissions`: the two fields a save writes
+    /// (`auto_approve_edits`, `terminal_policy`) are Auto's, so a restart reads Auto and runs
+    /// commands under Auto. Its permissive half lives only in `skip_permissions`, which carries
+    /// `#[serde(skip)]` and is never written. Storing Turbo with edits on would let a stricter
+    /// looking chip hide an unlisted-command policy that outlived the process.
+    pub fn set_permission_mode(&mut self, m: PermissionMode) {
+        self.agent_mode = m.agent_mode();
+        self.auto_approve_edits = m.auto_approve_edits();
+        // Bypass persists as Auto (see above); its accessor stays Turbo for the live policy.
+        self.terminal_policy = if m == PermissionMode::Bypass { TerminalPolicy::Auto } else { m.terminal() };
+        self.skip_permissions = m.skip_permissions();
+    }
+
     /// Clamp out-of-range values to something usable.
     pub fn sanitized(mut self) -> Self {
+        // Turbo without the skip flag is not one of the modes the chip offers: it is the stored
+        // half of a Bypass pick (or a legacy file's "always proceed"). Left as is, a restart would
+        // read Auto-looking fields while every unlisted command ran unattended, so it becomes
+        // Auto. Bypass itself is `skip_permissions`, which a file never sets.
+        if self.terminal_policy == TerminalPolicy::Turbo && !self.skip_permissions {
+            self.terminal_policy = TerminalPolicy::Auto;
+        }
         if self.model.trim().is_empty() {
             self.model = DEFAULT_MODEL.into();
         }
@@ -1027,7 +1086,13 @@ mod tests {
             "queuedMessages": "send-immediately",
         }));
         assert_eq!(s.agent_mode, AgentMode::Planning);
-        assert_eq!(s.terminal_policy, TerminalPolicy::Turbo);
+        // The legacy spelling still parses to Turbo on its own; a loaded file cannot keep it
+        // (see `sanitized`), because Turbo without the skip flag would run unlisted commands
+        // while the chip said Auto.
+        let raw: Settings = serde_json::from_value(serde_json::json!({"terminal_policy": "always-proceed"})).unwrap();
+        assert_eq!(raw.terminal_policy, TerminalPolicy::Turbo);
+        assert_eq!(s.terminal_policy, TerminalPolicy::Auto);
+        assert_eq!(Settings::from_json(serde_json::json!({"toolPermission": "always-proceed"})).terminal_policy, TerminalPolicy::Auto);
         assert_eq!(s.artifact_review, ArtifactReviewPolicy::AlwaysProceed);
         assert_eq!(s.terminal_allowlist, vec!["cargo test".to_owned(), "git status".to_owned()]);
         assert_eq!(s.terminal_denylist, vec!["rm -rf".to_owned(), "format".to_owned()]);
@@ -1313,6 +1378,65 @@ mod tests {
         assert_eq!(second.kind(), std::io::ErrorKind::WouldBlock, "told apart from a folder that cannot be locked");
         drop(first);
         assert!(lock_data_dir(dir.path()).is_ok(), "the folder is free again once the first exits");
+    }
+
+    /// The five modes are the combinations the UI offers; the others collapse onto the nearest
+    /// one, as the cases below show, and writing a mode and reading it back gives the same mode.
+    #[test]
+    fn permission_modes_round_trip() {
+        // A new install derives Manual: Fast, no auto-edits, commands ask. Planning is one
+        // explicit mode (Plan), not the default.
+        assert_eq!(Settings::default().permission_mode(), PermissionMode::Manual);
+        assert_eq!(Settings { agent_mode: AgentMode::Planning, ..Settings::default() }.permission_mode(), PermissionMode::Plan);
+        for m in [PermissionMode::Manual, PermissionMode::EditAuto, PermissionMode::Plan, PermissionMode::Auto, PermissionMode::Bypass] {
+            let mut s = Settings::default();
+            // Start from a mode far from `m`, so the write has to set every field.
+            s.set_permission_mode(if m == PermissionMode::Bypass { PermissionMode::Manual } else { PermissionMode::Bypass });
+            s.set_permission_mode(m);
+            assert_eq!(s.permission_mode(), m, "{m:?}");
+            assert_eq!(s.agent_mode, m.agent_mode(), "{m:?}");
+            assert_eq!(s.auto_approve_edits, m.auto_approve_edits(), "{m:?}");
+            // Bypass stores Auto's terminal fields: the skip flag alone carries what it adds.
+            let stored_terminal = if m == PermissionMode::Bypass { TerminalPolicy::Auto } else { m.terminal() };
+            assert_eq!(s.terminal_policy, stored_terminal, "{m:?}");
+            assert_eq!(s.skip_permissions, m.skip_permissions(), "{m:?}");
+        }
+        // Turbo without the skip flag is not a mode: in memory it reads as Auto, never as the
+        // milder-looking Manual or EditAuto. `sanitized` turns it into Auto, so a file cannot
+        // hold it either.
+        let turbo = Settings { agent_mode: AgentMode::Fast, terminal_policy: TerminalPolicy::Turbo, ..Settings::default() };
+        assert_eq!(turbo.permission_mode(), PermissionMode::Auto);
+        assert_eq!(Settings { auto_approve_edits: true, ..turbo }.permission_mode(), PermissionMode::Auto);
+        let stored = Settings { agent_mode: AgentMode::Fast, terminal_policy: TerminalPolicy::Turbo, ..Settings::default() }.sanitized();
+        assert_eq!(stored.terminal_policy, TerminalPolicy::Auto, "a stored Turbo cannot outlive a restart");
+    }
+
+    /// Bypass is `skip_permissions`, and that field is never read from the file: a settings.json
+    /// asking for it (hand-edited, or a launcher's own copy) starts in Manual, not Bypass.
+    #[test]
+    fn a_file_cannot_turn_on_bypass() {
+        let s = Settings::from_json(serde_json::json!({"skip_permissions": true, "model": "gemini-3.5-flash"}));
+        assert!(!s.skip_permissions);
+        assert_ne!(s.permission_mode(), PermissionMode::Bypass);
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(Settings::path(dir.path()), br#"{"skip_permissions":true}"#).unwrap();
+        let s = Settings::load(dir.path());
+        assert_ne!(s.permission_mode(), PermissionMode::Bypass);
+        // A mode stored through the setter comes back the same, Bypass excepted: what it saves
+        // is Auto's fields, so the reloaded file reads as Auto and runs commands under Auto; the
+        // skip flag that made it Bypass is not written.
+        let mut s = Settings::default();
+        s.set_permission_mode(PermissionMode::Auto);
+        s.save(dir.path()).unwrap();
+        assert_eq!(Settings::load(dir.path()).permission_mode(), PermissionMode::Auto);
+        s.set_permission_mode(PermissionMode::Bypass);
+        s.save(dir.path()).unwrap();
+        let reloaded = Settings::load(dir.path());
+        assert_eq!(reloaded.permission_mode(), PermissionMode::Auto, "Bypass is not written");
+        assert_ne!(reloaded.terminal_policy, TerminalPolicy::Turbo, "the skip flag's permissiveness is not stored");
+        assert!(!reloaded.skip_permissions);
+        // The live policy of a pick is still Bypass, before and after the save.
+        assert_eq!(s.permission_mode(), PermissionMode::Bypass);
     }
 
     #[test]

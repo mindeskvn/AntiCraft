@@ -2,7 +2,7 @@
 //! `_ref/ui/01-home.png`; ORCHESTRATION.md D): multiline input, `+` menu, model chip with the
 //! model picker (2.6), the Planning/Fast mode chip, `@` mention and `/` command popups,
 //! queued-message chips (Queue / Steer), edit-last-message, the model menu (which also picks
-//! the agent), the permission preset chip and send / stop.
+//! the agent), the permission mode chip and send / stop.
 //!
 //! Composer-only state ([`ComposerState`]) lives in egui temp memory under one fixed id, so
 //! `UiState` and the screen signatures stay unchanged. Backend events for it are routed with
@@ -23,7 +23,7 @@ use super::queue::{self, ChipAction, LocalQueue, QueueMode};
 use super::slash::{self, Builtin, SlashItem};
 use super::{format, icons, theme, widgets, ChatItem, UiAction, UiState};
 use crate::agent::context::Workflow;
-use crate::agent::policy::{AgentMode, TerminalPolicy};
+use crate::agent::policy::{AgentMode, PermissionMode};
 use crate::app::AppCommand;
 
 /// Card radius measured on the reference.
@@ -95,8 +95,8 @@ pub struct ComposerState {
     queue_conv: Option<Uuid>,
     /// Agent (mode) per conversation (`None`: the unsaved new chat).
     modes: HashMap<Option<Uuid>, AgentMode>,
-    /// Permission preset per conversation; a conversation without one follows Settings.
-    presets: HashMap<Option<Uuid>, TerminalPolicy>,
+    /// Permission mode per conversation; a conversation without one follows Settings.
+    perms: HashMap<Option<Uuid>, PermissionMode>,
     last_conv: Option<Uuid>,
     /// Original text of the last user message while it is being edited.
     pub editing: Option<String>,
@@ -509,9 +509,9 @@ fn input_body(ui: &mut Ui, cs: &mut ComposerState, state: &mut UiState, commands
             if let Some(m) = cs.modes.remove(&None) {
                 cs.modes.insert(state.current, m);
             }
-            // A preset picked on Home belongs to the conversation that prompt starts.
-            if let Some(p) = cs.presets.remove(&None) {
-                cs.presets.insert(state.current, p);
+            // A permission mode picked on Home belongs to the conversation that prompt starts.
+            if let Some(p) = cs.perms.remove(&None) {
+                cs.perms.insert(state.current, p);
             }
         }
         if !cs.queue.backend_owned {
@@ -808,30 +808,56 @@ fn input_body(ui: &mut Ui, cs: &mut ComposerState, state: &mut UiState, commands
             }
             soon_icon(ui, icons::MICROPHONE);
             ui.add_space(2.0);
-            preset_chip(ui, cs, state, commands);
+            mode_chip(ui, cs, state, commands);
         });
     });
 }
 
-/// Label, icon and description of a permission preset (the terminal auto-run policy).
-pub fn preset_label(p: TerminalPolicy) -> (&'static str, &'static str, &'static str) {
-    match p {
-        TerminalPolicy::Off => (icons::HAND, "Ask", "Every command waits for your approval"),
-        TerminalPolicy::Auto => (icons::SHIELD_CHECK, "Auto", "Read-only and build commands run on their own"),
-        TerminalPolicy::Turbo => (icons::SHIELD, "Turbo", "Everything not on the denylist runs; deletions still ask"),
+/// Label, icon and description of one [`PermissionMode`], as the chip and its menu show it.
+/// The description is what the mode actually does to the four policy fields behind it; reads and
+/// allowlisted commands run on their own where their settings say so, so no description claims
+/// that every call waits.
+pub fn permission_label(m: PermissionMode) -> (&'static str, &'static str, &'static str) {
+    match m {
+        PermissionMode::Manual => (icons::HAND, "Manual", "Commands and edits wait for your approval"),
+        PermissionMode::EditAuto => (icons::PENCIL_SIMPLE_LINE, "Edit Auto", "File edits apply on their own; commands still ask"),
+        PermissionMode::Plan => (icons::NOTE_PENCIL, "Plan", "Plan first: research, write a plan you can review, then build"),
+        PermissionMode::Auto => (icons::SHIELD_CHECK, "Auto", "Read-only and build commands run on their own; edits apply"),
+        PermissionMode::Bypass => (
+            icons::WARNING,
+            "Bypass",
+            "Every tool call runs without asking, except file deletions, denylisted commands and MCP tools",
+        ),
     }
 }
 
-/// Permission preset chip (`Turbo ^`): which commands run without asking, for this
-/// conversation only. Deletions and denylisted commands ask or are refused whatever it says.
-fn preset_chip(ui: &mut Ui, cs: &mut ComposerState, state: &UiState, commands: &mut Vec<UiAction>) {
-    if state.settings.skip_permissions {
-        let r = widgets::pill_chip(ui, Some(icons::WARNING), "Unrestricted", false, true, false);
-        r.on_hover_text("Started with --dangerously-skip-permissions: tool calls run without asking, except deletions and denylisted commands.");
-        return;
+/// The five modes in the order the chip lists them.
+const PERMISSION_MODES: [PermissionMode; 5] =
+    [PermissionMode::Manual, PermissionMode::EditAuto, PermissionMode::Plan, PermissionMode::Auto, PermissionMode::Bypass];
+
+/// The conversation's permission mode: its own pick, else the one its agent mode and the stored
+/// policy fields derive. The agent mode is the conversation's ([`current_mode`]), not
+/// `settings.agent_mode`: a `/fast` or a model-chip pick on an undecided conversation moves it,
+/// and the permission chip must name what that conversation will actually do. (The model chip's
+/// own value is [`current_mode`], which is an [`AgentMode`].)
+fn current_permission(cs: &ComposerState, state: &UiState) -> PermissionMode {
+    if let Some(m) = cs.perms.get(&state.current).copied() {
+        return m;
     }
-    let preset = cs.presets.get(&state.current).copied().unwrap_or(state.settings.terminal_policy);
-    let (icon, label, _) = preset_label(preset);
+    state.settings.permission_mode_for(current_mode_of(cs, state))
+}
+
+/// The conversation's agent mode: its pick, else the Settings default.
+fn current_mode_of(cs: &ComposerState, state: &UiState) -> AgentMode {
+    cs.modes.get(&state.current).copied().unwrap_or(state.settings.agent_mode)
+}
+
+/// Permission mode chip (`Manual v`): whether tool calls ask, for this conversation only.
+/// Bypass takes one click, like every other mode; deletions, denylisted commands and MCP tools
+/// still ask or are refused whatever it says, and it is never saved.
+fn mode_chip(ui: &mut Ui, cs: &mut ComposerState, state: &UiState, commands: &mut Vec<UiAction>) {
+    let mode = current_permission(cs, state);
+    let (icon, label, _) = permission_label(mode);
     let r = widgets::pill_chip_up(ui, Some(icon), label, true);
     let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&r));
     let r = if open { r } else { r.on_hover_text("Permissions for this conversation") };
@@ -848,13 +874,13 @@ fn preset_chip(ui: &mut Ui, cs: &mut ComposerState, state: &UiState, commands: &
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 ui.add_space(8.0);
-                ui.label(egui::RichText::new("Commands in this conversation").font(theme::font(11.5)).color(theme::FG_MUTED));
+                ui.label(egui::RichText::new("Permissions in this conversation").font(theme::font(11.5)).color(theme::FG_MUTED));
             });
             ui.add_space(4.0);
-            for p in [TerminalPolicy::Off, TerminalPolicy::Auto, TerminalPolicy::Turbo] {
-                let (icon, label, desc) = preset_label(p);
-                if option_row(ui, icon, label, desc, p == preset) {
-                    pick = Some(p);
+            for m in PERMISSION_MODES {
+                let (icon, label, desc) = permission_label(m);
+                if option_row(ui, icon, label, desc, m == mode) {
+                    pick = Some(m);
                     ui.close();
                 }
             }
@@ -865,9 +891,8 @@ fn preset_chip(ui: &mut Ui, cs: &mut ComposerState, state: &UiState, commands: &
             });
             ui.add_space(4.0);
         });
-    if let Some(p) = pick.filter(|&p| p != preset) {
-        cs.presets.insert(state.current, p);
-        commands.push(AppCommand::SetPermissionPreset(p));
+    if let Some(m) = pick.filter(|&m| m != mode) {
+        set_permission_mode(cs, state, commands, m);
     }
 }
 
@@ -987,7 +1012,21 @@ fn submit(cs: &mut ComposerState, state: &mut UiState, commands: &mut Vec<UiActi
 
 fn set_mode(cs: &mut ComposerState, state: &UiState, commands: &mut Vec<UiAction>, m: AgentMode) {
     cs.modes.insert(state.current, m);
+    // The later pick wins: a permission mode naming the other agent mode goes with it, or the
+    // permission chip would keep showing a policy the new mode contradicts.
+    if cs.perms.get(&state.current).is_some_and(|p| p.agent_mode() != m) {
+        cs.perms.remove(&state.current);
+    }
     commands.push(AppCommand::SetAgentMode(m));
+}
+
+/// Record a permission mode picked in the chip. Its agent mode goes to the model chip too:
+/// Plan is a Planning conversation and the other four are Fast, so both chips agree at once
+/// instead of only after the backend's next event.
+fn set_permission_mode(cs: &mut ComposerState, state: &UiState, commands: &mut Vec<UiAction>, m: PermissionMode) {
+    cs.perms.insert(state.current, m);
+    cs.modes.insert(state.current, m.agent_mode());
+    commands.push(AppCommand::SetPermissionMode(m));
 }
 
 /// One popup row.
@@ -1346,6 +1385,58 @@ mod tests {
         assert!(matches!(&s.items[2], ChatItem::User(t) if t == "second, fixed"));
         assert_eq!(s.items.iter().filter(|i| matches!(i, ChatItem::User(_))).count(), 2);
         assert!(cs.editing.is_none());
+    }
+
+    /// The permission chip names the mode the conversation runs with, and each of the five has
+    /// its own label, icon and description in the order the menu lists them.
+    #[test]
+    fn permission_chip_label_follows_the_mode() {
+        use crate::agent::policy::PermissionMode;
+        let mut cs = ComposerState::default();
+        let mut state = st();
+        let labels: Vec<&str> = PERMISSION_MODES.iter().map(|&m| permission_label(m).1).collect();
+        assert_eq!(labels, ["Manual", "Edit Auto", "Plan", "Auto", "Bypass"]);
+        // Nothing picked: Settings decides.
+        state.settings.set_permission_mode(PermissionMode::EditAuto);
+        assert_eq!(permission_label(current_permission(&cs, &state)).1, "Edit Auto");
+        // The conversation's own pick wins over Settings.
+        let id = uuid::Uuid::new_v4();
+        state.current = Some(id);
+        for m in PERMISSION_MODES {
+            let mut commands = Vec::new();
+            set_permission_mode(&mut cs, &state, &mut commands, m);
+            assert_eq!(permission_label(current_permission(&cs, &state)).1, permission_label(m).1, "{m:?}");
+            assert!(matches!(&commands[..], [AppCommand::SetPermissionMode(x)] if *x == m));
+            // Both chips agree: the model chip gets the mode the permission mode runs in.
+            assert_eq!(cs.modes.get(&state.current), Some(&m.agent_mode()));
+        }
+        assert_eq!(permission_label(PermissionMode::Bypass).0, icons::WARNING);
+    }
+
+    /// With nothing picked, the chip follows the conversation's agent mode, not the Settings
+    /// default: `/fast` or `/plan` on an undecided conversation moves what the chip says, and
+    /// the chip names the milder of the two when they could disagree.
+    #[test]
+    fn permission_chip_follows_the_conversation_agent_mode() {
+        use crate::agent::policy::PermissionMode;
+        let mut cs = ComposerState::default();
+        let mut state = st();
+        state.settings.set_permission_mode(PermissionMode::Plan);
+        let id = uuid::Uuid::new_v4();
+        state.current = Some(id);
+        assert_eq!(permission_label(current_permission(&cs, &state)).1, "Plan");
+        // `/fast` on the undecided conversation: the mode is now the Fast one Settings describes.
+        let mut commands = Vec::new();
+        set_mode(&mut cs, &state, &mut commands, AgentMode::Fast);
+        assert_eq!(permission_label(current_permission(&cs, &state)).1, "Manual");
+        // `/plan` back: Plan again.
+        set_mode(&mut cs, &state, &mut commands, AgentMode::Planning);
+        assert_eq!(permission_label(current_permission(&cs, &state)).1, "Plan");
+        // The default Settings (Manual) with a Planning conversation reads Plan only because the
+        // terminal and edits are still Off/false; make them permissive and it must not claim Plan.
+        state.settings.set_permission_mode(PermissionMode::Auto);
+        cs.modes.insert(state.current, AgentMode::Planning);
+        assert_eq!(permission_label(current_permission(&cs, &state)).1, "Auto");
     }
 
     #[test]

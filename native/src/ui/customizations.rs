@@ -15,7 +15,7 @@ use crate::auth::external::{AccountProvider, AccountStatus, AccountView};
 use crate::auth::{AuthStatus, ClientSource, CLIENT_SECRET_ENV};
 use crate::agent::policy::{validate_rule, MAX_RULES};
 use crate::agent::plugins::PluginChoice;
-use crate::settings::{AgentMode, ArtifactReviewPolicy, ConversationWidth, FontSize, QueueMode, Settings, TerminalPolicy, Theme, UiFont, MAX_PROVIDER_PROFILES};
+use crate::settings::{AgentMode, ArtifactReviewPolicy, ConversationWidth, FontSize, PermissionMode, QueueMode, Settings, Theme, UiFont, MAX_PROVIDER_PROFILES};
 use crate::providers::{ProviderKind, ProviderProfile};
 
 /// Widest the section's rows get inside the card.
@@ -443,15 +443,22 @@ fn tools(ui: &mut Ui, state: &mut UiState, commands: &mut Vec<UiAction>, cx: &mu
     ui.add_space(22.0);
     section(ui, "Tools and approvals", "Decide which agent tools run on their own. Denylisted commands never run, whatever else is set.");
     dirty |= toggle_row(ui, cx, icons::MAGNIFYING_GLASS, theme::ACCENT_BLUE, "Auto-approve read and search tools", "read_file, list_directory, glob and grep_search run without asking.", &mut st.auto_approve_read_tools);
-    dirty |= toggle_row(ui, cx, icons::PENCIL_SIMPLE_LINE, theme::ACCENT_AMBER, "Apply file edits without asking", "write_file and replace still build a diff, and a file changed meanwhile is never overwritten.", &mut st.auto_approve_edits);
+    row(ui, cx, icons::HAND, theme::ACCENT_AMBER, "Mode", "The mode every new conversation starts from. Manual asks for commands and edits, with no auto-run. Edit Auto applies file edits and still asks for commands. Plan researches and writes a plan first. Auto runs read-only and build commands and applies edits. Bypass runs every call without asking (deletions, denylisted commands and MCP tools still ask) and is not saved: it lasts for this run only, and a restart comes back on Auto, which is the mode its save stores.", |ui| {
+        let mut mode = st.permission_mode();
+        if widgets::segmented(
+            ui,
+            &mut mode,
+            &[(PermissionMode::Manual, "Manual"), (PermissionMode::EditAuto, "Edit Auto"), (PermissionMode::Plan, "Plan"), (PermissionMode::Auto, "Auto"), (PermissionMode::Bypass, "Bypass")],
+        ) {
+            st.set_permission_mode(mode);
+            dirty = true;
+        }
+    });
     row(ui, cx, icons::CHECK_CIRCLE, theme::SUCCESS, "\"Always allow\" choices", "Choices made in the confirmation prompt last until the conversation or app is closed.", |ui| {
         ui.label(egui::RichText::new("Session only").font(theme::font(12.0)).color(theme::FG_MUTED));
     });
     ui.add_space(22.0);
-    section(ui, "Terminal", "run_shell_command runs PowerShell inside the workspace.");
-    row(ui, cx, icons::TERMINAL_WINDOW, theme::ACCENT_RED, "Command auto-run", "Off asks every time. Auto runs known read-only and build commands. Turbo runs everything not on the denylist.", |ui| {
-        dirty |= widgets::segmented(ui, &mut st.terminal_policy, &[(TerminalPolicy::Off, "Off"), (TerminalPolicy::Auto, "Auto"), (TerminalPolicy::Turbo, "Turbo")]);
-    });
+    section(ui, "Terminal", "run_shell_command runs PowerShell inside the workspace. Commands run on their own according to the Mode above.");
     row(ui, cx, icons::CLOCK_COUNTER_CLOCKWISE, theme::FG_SECONDARY, "Shell timeout", "Seconds before a running command and its child processes are stopped (5-3600).", |ui| {
         dirty |= number(ui, &mut st.shell_timeout_secs, 5..=3600, " s");
     });
@@ -2646,6 +2653,45 @@ mod tests {
         egui::pos2(row.left() + TOGGLE_COLUMN + 20.0, row.center().y)
     }
 
+    /// The Tools tab offers the five permission modes as one row, and a click writes all four
+    /// policy fields through `set_permission_mode` and marks the settings dirty. The old
+    /// separate "apply file edits" toggle and "Command auto-run" control are gone.
+    #[test]
+    fn the_mode_row_offers_the_five_modes() {
+        use crate::settings::PermissionMode;
+        let ctx = context();
+        let mut state = bypass_state();
+        state.settings.set_permission_mode(PermissionMode::Manual);
+        let texts = tall_page(&ctx, &mut state, Vec::new());
+        let row = rects_of(&texts, "Mode")[0];
+        // The segmented control sits in the row's own vertical band (the description can make
+        // the row tall), to the right of the label.
+        let on_row = |r: &Rect| r.center().y > row.top() && r.center().y < row.bottom() + 80.0 && r.center().x > row.right();
+        for label in ["Manual", "Edit Auto", "Plan", "Auto", "Bypass"] {
+            assert!(texts.iter().any(|(t, r)| t == label && on_row(r)), "{label:?} is not on the Mode row: {texts:?}");
+        }
+        assert!(!shows(&texts, "Apply file edits without asking"));
+        assert!(!shows(&texts, "Command auto-run"));
+        // The description keeps the words the settings search looks for.
+        assert!(shows(&texts, "auto-run") && shows(&texts, "Manual asks"));
+
+        for m in [PermissionMode::Plan, PermissionMode::Auto, PermissionMode::Bypass, PermissionMode::EditAuto] {
+            let texts = tall_page(&ctx, &mut state, Vec::new());
+            let row = rects_of(&texts, "Mode")[0];
+            let label = super::super::composer::permission_label(m).1;
+            let pos = texts
+                .iter()
+                .find(|(t, r)| t == label && r.center().y > row.top() && r.center().y < row.bottom() + 80.0 && r.center().x > row.right())
+                .map(|(_, r)| r.center())
+                .unwrap_or_else(|| panic!("no {label:?} on the Mode row: {texts:?}"));
+            tall_click(&ctx, &mut state, pos);
+            assert_eq!(state.settings.permission_mode(), m, "{m:?}");
+            assert_eq!(state.settings.skip_permissions, m.skip_permissions(), "{m:?}");
+            assert!(state.settings_dirty, "{m:?}");
+        }
+    }
+
+    /// The tools tab carries the Bypass section.
     #[test]
     fn the_tools_tab_carries_the_bypass_section() {
         let ctx = context();

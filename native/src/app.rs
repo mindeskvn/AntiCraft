@@ -8,7 +8,7 @@
 //! Code Assist. `Settings::sanitized` keeps the first two exclusive, so which backend sends a turn
 //! never depends on which field a screen happens to read.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -121,8 +121,8 @@ pub enum AppCommand {
     SendPromptWithMode(String, crate::agent::policy::AgentMode),
     /// Set the conversation mode chip.
     SetAgentMode(crate::agent::policy::AgentMode),
-    /// Permission preset (terminal auto-run) for the open conversation only.
-    SetPermissionPreset(crate::agent::policy::TerminalPolicy),
+    /// Permission mode (the message box chip) for the open conversation only.
+    SetPermissionMode(crate::agent::policy::PermissionMode),
     /// Truncate history before the last user message and send `text` instead. The mode is the
     /// one-shot `/plan` or `/fast` the edited prompt was sent with, so editing does not lose it.
     EditLastPrompt(String, Option<crate::agent::policy::AgentMode>),
@@ -466,14 +466,15 @@ pub struct Backend {
     mcp: Option<Arc<McpHub>>,
     /// Modes chosen per conversation this session (the composer chip is per conversation).
     modes: HashMap<Uuid, AgentMode>,
-    /// Permission preset per conversation, chosen in the message box; one without follows
-    /// `settings.terminal_policy`.
-    presets: HashMap<Uuid, crate::agent::policy::TerminalPolicy>,
-    /// The open conversation's preset, if it chose one.
-    conv_preset: Option<crate::agent::policy::TerminalPolicy>,
-    /// Mode and preset picked in the message box while no conversation exists (the first Home
-    /// after start, or after the open one was deleted): the next conversation takes them.
-    pending_choice: (Option<AgentMode>, Option<crate::agent::policy::TerminalPolicy>),
+    /// Permission mode per conversation, chosen in the message box; one without follows
+    /// [`Settings::permission_mode`].
+    permissions: HashMap<Uuid, crate::agent::policy::PermissionMode>,
+    /// The open conversation's permission mode, if it chose one.
+    conv_permission: Option<crate::agent::policy::PermissionMode>,
+    /// Mode and permission mode picked in the message box while no conversation exists (the
+    /// first Home after start, or after the open one was deleted): the next conversation takes
+    /// them.
+    pending_choice: (Option<AgentMode>, Option<crate::agent::policy::PermissionMode>),
     /// Messages queued while a turn runs: (id, text). Belongs to the open conversation.
     queue: VecDeque<(u64, String)>,
     queue_seq: u64,
@@ -547,16 +548,37 @@ pub struct Backend {
 struct LaunchOverrides {
     file: Settings,
     flags: Settings,
+    /// Fields the user changed since the UI's copy was taken; the save that carries them
+    /// releases them from the flags, even when the new value equals the flag's. Without this a
+    /// Mode-row pick of Bypass (edits and Auto) under `--mode auto` (the same two values) would
+    /// be written back as the file's own pair, so the row would look changed and the file not be.
+    released: BTreeSet<&'static str>,
 }
 
 impl LaunchOverrides {
+    /// Names of the fields `settings` changed from `base` (the UI's copy before its edits).
+    fn changed(base: &Settings, settings: &Settings) -> BTreeSet<&'static str> {
+        let mut out = BTreeSet::new();
+        let mut note = |name, differs: bool| {
+            if differs {
+                out.insert(name);
+            }
+        };
+        note("model", base.model != settings.model);
+        note("agent_mode", base.agent_mode != settings.agent_mode);
+        note("auto_approve_edits", base.auto_approve_edits != settings.auto_approve_edits);
+        note("terminal_policy", base.terminal_policy != settings.terminal_policy);
+        note("auto_approve_read_tools", base.auto_approve_read_tools != settings.auto_approve_read_tools);
+        out
+    }
+
     /// `settings` as settings.json should hold it.
     fn for_file(&self, settings: &Settings) -> Settings {
         let mut out = settings.clone();
         macro_rules! restore {
             ($($field:ident),* $(,)?) => {
                 $(
-                    if out.$field == self.flags.$field {
+                    if !self.released.contains(stringify!($field)) && out.$field == self.flags.$field {
                         out.$field = self.file.$field.clone();
                     }
                 )*
@@ -782,7 +804,7 @@ impl Backend {
         if let Some(mode) = opts.mode {
             mode.apply(&mut settings);
         }
-        let launch = LaunchOverrides { file, flags: settings.clone() };
+        let launch = LaunchOverrides { file, flags: settings.clone(), released: BTreeSet::new() };
         settings.skip_permissions = opts.skip_permissions;
         if let Some(ws) = &opts.workspace {
             settings.remember_workspace(ws);
@@ -818,8 +840,8 @@ impl Backend {
             plugins: Vec::new(),
             mcp: None,
             modes: HashMap::new(),
-            presets: HashMap::new(),
-            conv_preset: None,
+            permissions: HashMap::new(),
+            conv_permission: None,
             pending_choice: (None, None),
             queue: VecDeque::new(),
             queue_seq: 0,
@@ -1185,12 +1207,17 @@ impl Backend {
         self.emit(AppEvent::Queue(self.queue.iter().cloned().collect()));
     }
 
-    /// Rebuild the shared policy from settings and the conversation mode. A running turn
-    /// sees the change at its next request or tool call.
+    /// Rebuild the shared policy from settings and the conversation's choices. A conversation
+    /// that picked a permission mode overrides the terminal, edit, skip and read fields; a
+    /// running turn sees the change at its next request or tool call. A conversation that picked
+    /// none follows Settings, its read/search toggle included.
     fn sync_policy(&self) {
         let mut policy = self.settings.approval_policy(self.conv_mode);
-        if let Some(t) = self.conv_preset {
-            policy.terminal = t;
+        if let Some(m) = self.conv_permission {
+            policy.terminal = m.terminal();
+            policy.auto_approve_edits = m.auto_approve_edits();
+            policy.skip_permissions = m.skip_permissions();
+            policy.auto_approve_read_tools = m.auto_approve_read_tools();
         }
         *self.policy.write().unwrap_or_else(|e| e.into_inner()) = policy;
     }
@@ -1436,6 +1463,9 @@ impl Backend {
                     next.select_profile(settings.active_provider.clone());
                 }
                 let next = next.sanitized();
+                // A field this save changed is the user's pick for this run: write it, even when
+                // it happens to equal the launch flag's value.
+                self.launch.released.extend(LaunchOverrides::changed(&base, &settings));
                 let rebuild = agent_inputs_changed(&self.settings, &next);
                 let accounts_changed = self.settings.accounts != next.accounts;
                 self.settings = next;
@@ -1538,26 +1568,53 @@ impl Backend {
                 }
             }
             AppCommand::SetAgentMode(m) => {
+                // The later pick wins: a permission mode whose agent mode this contradicts is
+                // dropped here, or the two chips would disagree and reopening would revert to it.
+                let mut dropped = false;
                 match self.current.as_ref().map(|c| c.id) {
                     Some(id) => {
                         self.modes.insert(id, m);
+                        if self.permissions.get(&id).is_some_and(|p| p.agent_mode() != m) {
+                            self.permissions.remove(&id);
+                            dropped = true;
+                        }
                     }
-                    None => self.pending_choice.0 = Some(m),
+                    None => {
+                        self.pending_choice.0 = Some(m);
+                        if self.pending_choice.1.is_some_and(|p| p.agent_mode() != m) {
+                            self.pending_choice.1 = None;
+                            dropped = true;
+                        }
+                    }
+                }
+                if dropped || self.conv_permission.is_some_and(|p| p.agent_mode() != m) {
+                    self.conv_permission = None;
+                    dropped = true;
                 }
                 if self.conv_mode != m {
                     self.conv_mode = m;
+                    dropped = true;
+                }
+                if dropped {
                     self.sync_policy();
                 }
             }
-            AppCommand::SetPermissionPreset(p) => {
+            AppCommand::SetPermissionMode(p) => {
                 match self.current.as_ref().map(|c| c.id) {
                     Some(id) => {
-                        self.presets.insert(id, p);
+                        self.permissions.insert(id, p);
+                        // The permission pick is the later one, and it names the agent mode.
+                        self.modes.insert(id, p.agent_mode());
                     }
-                    None => self.pending_choice.1 = Some(p),
+                    None => {
+                        self.pending_choice.1 = Some(p);
+                        self.pending_choice.0 = Some(p.agent_mode());
+                    }
                 }
-                if self.conv_preset != Some(p) {
-                    self.conv_preset = Some(p);
+                // Plan is a Planning mode and the other four are Fast: the model chip follows.
+                if self.conv_permission != Some(p) || self.conv_mode != p.agent_mode() {
+                    self.conv_permission = Some(p);
+                    self.conv_mode = p.agent_mode();
                     self.sync_policy();
                 }
             }
@@ -1815,8 +1872,17 @@ impl Backend {
     fn open(&mut self, mut conv: Conversation) {
         self.drop_agent();
         // An opened conversation gets its chosen mode (else the default) and an empty queue.
-        self.conv_mode = self.modes.get(&conv.id).copied().unwrap_or(self.settings.agent_mode);
-        self.conv_preset = self.presets.get(&conv.id).copied();
+        // The two chips can both name a mode: the model chip writes `modes`, the permission chip
+        // writes `permissions` and also `modes` (its agent mode). Each command keeps the other in
+        // step, and where an older pick still disagrees the model chip wins, because it is the
+        // one the composer shows and sends.
+        let picked = self.permissions.get(&conv.id).copied();
+        let mode = self.modes.get(&conv.id).copied().or_else(|| picked.map(|m| m.agent_mode())).unwrap_or(self.settings.agent_mode);
+        self.conv_permission = picked.filter(|m| m.agent_mode() == mode);
+        if self.conv_permission.is_none() {
+            self.permissions.remove(&conv.id);
+        }
+        self.conv_mode = mode;
         self.sync_policy();
         if !self.queue.is_empty() {
             self.queue.clear();
@@ -2043,15 +2109,15 @@ impl Backend {
         self.start_turn(kind);
     }
 
-    /// Give the conversation `id` the mode and preset picked before any conversation existed,
-    /// so the turn runs with what the message box shows.
+    /// Give the conversation `id` the mode and permission mode picked before any conversation
+    /// existed, so the turn runs with what the message box shows.
     fn adopt_pending_choice(&mut self, id: Uuid) {
-        let (mode, preset) = std::mem::take(&mut self.pending_choice);
+        let (mode, permission) = std::mem::take(&mut self.pending_choice);
         if let Some(m) = mode {
             self.modes.insert(id, m);
         }
-        if let Some(p) = preset {
-            self.presets.insert(id, p);
+        if let Some(p) = permission {
+            self.permissions.insert(id, p);
         }
     }
 
@@ -3044,25 +3110,33 @@ mod tests {
         assert!(b.turn_cancel.is_none(), "no turn should be running");
     }
 
-    /// The mode and preset picked on the first Home, before any conversation exists, are the
-    /// ones the conversation started by the first prompt runs with.
+    /// The mode and permission mode picked on the first Home, before any conversation exists,
+    /// are the ones the conversation started by the first prompt runs with.
     #[tokio::test]
     async fn choices_made_before_any_conversation_go_to_the_first_one() {
-        use crate::agent::policy::TerminalPolicy;
+        use crate::agent::policy::PermissionMode;
         let dir = tempfile::tempdir().unwrap();
         let (mut b, _rx, _) = backend(dir.path());
         assert!(b.current.is_none());
-        let other_mode = if b.settings.agent_mode == AgentMode::Fast { AgentMode::Planning } else { AgentMode::Fast };
-        let other_preset = if b.settings.terminal_policy == TerminalPolicy::Off { TerminalPolicy::Turbo } else { TerminalPolicy::Off };
-        b.handle(AppCommand::SetAgentMode(other_mode)).await;
-        b.handle(AppCommand::SetPermissionPreset(other_preset)).await;
+        // Fast, then Plan: the two picks name different agent modes, so the later one has to
+        // rewrite the mode the earlier one set, and the `modes` map with it.
+        b.handle(AppCommand::SetAgentMode(AgentMode::Fast)).await;
+        b.handle(AppCommand::SetPermissionMode(PermissionMode::Plan)).await;
         b.handle(AppCommand::SendPrompt("hi".into())).await;
         let id = b.current.as_ref().expect("the prompt started a conversation").id;
-        assert_eq!((b.conv_mode, b.conv_preset), (other_mode, Some(other_preset)));
-        assert_eq!((b.modes.get(&id), b.presets.get(&id)), (Some(&other_mode), Some(&other_preset)));
+        assert_eq!(b.conv_mode, AgentMode::Planning, "the permission pick's agent mode wins");
+        assert_eq!(b.conv_permission, Some(PermissionMode::Plan));
+        assert_eq!(b.modes.get(&id), Some(&AgentMode::Planning), "the model chip's pick follows the later one");
+        assert_eq!(b.permissions.get(&id), Some(&PermissionMode::Plan));
+        // The shared policy carries the conversation's mode, not the stored defaults.
+        assert_eq!(b.policy.read().unwrap().mode, AgentMode::Planning);
+        assert_eq!(b.policy.read().unwrap().terminal, PermissionMode::Plan.terminal());
+        assert!(!b.policy.read().unwrap().auto_approve_read_tools, "Plan waits for reads too");
+        assert_eq!(b.policy.read().unwrap().skip_permissions, PermissionMode::Plan.skip_permissions());
         // Used up: a later conversation starts from the defaults again.
         b.handle(AppCommand::NewChat).await;
-        assert_eq!((b.conv_mode, b.conv_preset), (b.settings.agent_mode, None));
+        assert_eq!((b.conv_mode, b.conv_permission), (b.settings.agent_mode, None));
+        assert_eq!(b.policy.read().unwrap().skip_permissions, b.settings.skip_permissions);
     }
 
     #[tokio::test]
@@ -3322,12 +3396,54 @@ mod tests {
         assert_eq!(saved.workspace_history, vec![ws.path().to_path_buf()], "the save itself happened");
         assert_eq!(b.settings.terminal_policy, crate::settings::TerminalPolicy::Auto, "and the run still uses the flag");
         // A field the user changes during the run is saved as chosen; the others stay the file's.
+        // The file's own pair, edited during the run, is written as chosen even while it holds
+        // the flag's value: here Bypass picked in the Mode row, whose saved fields are Auto's.
+        // Whatever the flags say, the reloaded file never carries Turbo: that half of Bypass is
+        // the skip flag, which no save writes.
+        b.launch.file.terminal_policy = crate::settings::TerminalPolicy::Auto;
         let mut ui = b.settings.clone();
-        ui.terminal_policy = crate::settings::TerminalPolicy::Turbo;
+        ui.set_permission_mode(crate::settings::PermissionMode::Bypass);
         b.handle(ui_save(&b, ui)).await;
         let saved = Settings::load(dir.path());
-        assert_eq!(saved.terminal_policy, crate::settings::TerminalPolicy::Turbo);
-        assert_eq!(saved.auto_approve_edits, file.auto_approve_edits);
+        assert_eq!(saved.terminal_policy, crate::settings::TerminalPolicy::Auto, "Bypass persists as Auto");
+        assert!(!saved.skip_permissions, "the skip flag is never written");
+    }
+
+    /// A flag-equal value the user picked is still written: with `--mode auto` in force, Bypass
+    /// picked in the Mode row (edits on, Auto's terminal) reaches the file even though both fields
+    /// match the flag, because a save that changed them releases them from the launch restore.
+    #[tokio::test]
+    async fn a_save_that_changes_a_flagged_field_writes_the_new_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = Settings { model: "file-model".into(), ..Settings::default() };
+        file.save(dir.path()).unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let (self_tx, _self_rx) = mpsc::unbounded_channel();
+        let opts = AppOptions {
+            data_dir: dir.path().to_path_buf(),
+            workspace: None,
+            model: None,
+            mode: Some(crate::ExecutionMode::Auto),
+            skip_permissions: false,
+        };
+        let mut b = Backend::new(opts, CancellationToken::new(), tx, self_tx);
+        b.handle(AppCommand::NewChat).await;
+        // The UI took its copy before the first save; the launch flag then changed the fields,
+        // and the user's pick moves them again, back onto the flag's values this time: Manual
+        // first (edits off, commands waiting), then Bypass (edits on, Auto's terminal).
+        let base = Settings { model: "file-model".into(), ..Settings::default() };
+        let mut ui = base.clone();
+        ui.set_permission_mode(crate::settings::PermissionMode::Manual);
+        ui.set_permission_mode(crate::settings::PermissionMode::Bypass);
+        let changed = LaunchOverrides::changed(&base, &ui);
+        assert!(changed.contains("auto_approve_edits") && changed.contains("terminal_policy"), "{changed:?}");
+        b.handle(AppCommand::SaveSettings { seq: b.settings_seq + 1, base: Box::new(base), settings: Box::new(ui) }).await;
+        let saved = Settings::load(dir.path());
+        assert_eq!(saved.terminal_policy, crate::settings::TerminalPolicy::Auto);
+        assert!(saved.auto_approve_edits, "the edits half of Bypass is written");
+        assert_eq!(saved.agent_mode, AgentMode::Fast);
+        assert!(!saved.skip_permissions);
+        assert_eq!(saved.model, "file-model", "the flag-only model stays the file's");
     }
 
     #[tokio::test]
@@ -3396,7 +3512,7 @@ mod tests {
         // Theme and policy: the policy reaches a live agent through the shared handle.
         let mut s = b.settings.clone();
         s.theme = crate::settings::Theme::Light;
-        s.terminal_policy = crate::settings::TerminalPolicy::Turbo;
+        s.auto_approve_edits = true;
         b.handle(ui_save(&b, s)).await;
         assert!(b.agent.is_some(), "the conversation keeps its agent, and its \"Always allow\" choices with it");
         // A setting the agent is built from rebuilds it.

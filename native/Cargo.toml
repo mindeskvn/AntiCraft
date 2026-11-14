@@ -1,6 +1,6 @@
 [package]
 name = "anticraft-native"
-version = "0.10.0"
+version = "0.10.1"
 edition = "2021"
 description = "AntiCraft native desktop coding agent (Rust, egui) for Google Code Assist"
 license = "Apache-2.0"
