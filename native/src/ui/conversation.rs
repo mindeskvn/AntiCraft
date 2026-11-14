@@ -13,23 +13,20 @@ use egui_commonmark::CommonMarkCache;
 
 use super::artifacts_panel::{self, ArtifactsPanel, PanelAction};
 use super::taskgroups::{self, Derived};
-use super::{composer, confirm, format, icons, markdown, progress_panel, theme, widgets, Banner, ChatItem, ToolCard, UiAction, UiState, ITEM_PAGE};
+use super::{composer, confirm, format, icons, markdown, navigator, progress_panel, theme, widgets, Banner, ChatItem, ToolCard, UiAction, UiState, ITEM_PAGE};
 use crate::agent::artifacts::comments_to_feedback;
 use crate::agent::orchestrate::{self, ReviewOutcome};
 use crate::app::AppCommand;
 use crate::auth::external::AccountProvider;
 
 
-/// Minimum gutter on each side of the centered reading column.
-const COLUMN_MIN_GUTTER: f32 = 24.0;
-/// Reading column width: the shared 768 token (DESIGN.md 2.5), same as Home and History.
-const COLUMN_MAX: f32 = theme::COLUMN_WIDTH;
+/// Minimum gutter on each side of the centered reading column; the left one holds the
+/// navigator rail.
+const COLUMN_MIN_GUTTER: f32 = 32.0;
 /// Narrowest column kept next to a side panel (the panel shrinks first).
 const COLUMN_BESIDE_PANEL_MIN: f32 = 480.0;
-/// Sticky header strip height.
-const HEADER_H: f32 = 33.0;
-/// Gap between the panel top and the header strip (border at reference y 84).
-const HEADER_TOP: f32 = 12.0;
+/// Space above the first message, inside the card.
+const TRANSCRIPT_TOP: f32 = 20.0;
 
 /// Left-anchored reading column inside the main panel.
 #[derive(Clone, Copy)]
@@ -39,9 +36,11 @@ struct Col {
 }
 
 impl Col {
-    /// Centered column: at most [`COLUMN_MAX`] wide, at least [`COLUMN_MIN_GUTTER`] per side.
+    /// Centered column: at most the Appearance width ([`theme::column_max`]; the whole card for
+    /// "Fill"), at least [`COLUMN_MIN_GUTTER`] per side.
     fn for_width(avail: f32) -> Self {
-        let w = (avail - 2.0 * COLUMN_MIN_GUTTER).min(COLUMN_MAX).max(200.0_f32.min(avail));
+        let max = theme::column_max().unwrap_or(f32::INFINITY);
+        let w = (avail - 2.0 * COLUMN_MIN_GUTTER).min(max).max(200.0_f32.min(avail));
         Col { pad: ((avail - w) / 2.0).max(0.0), w }
     }
 
@@ -93,10 +92,11 @@ pub fn show(ui: &mut Ui, state: &mut UiState, cache: &mut CommonMarkCache, comma
             .exact_size(w)
             .resizable(false)
             .show_separator_line(false)
-            .frame(egui::Frame::NONE.fill(theme::SIDEBAR).inner_margin(egui::Margin::same(12)))
+            .frame(egui::Frame::NONE.inner_margin(egui::Margin::same(12)))
             .show(ui, |ui| {
+                // No fill: the panel is part of the card, divided from the column by one line.
                 let r = ui.max_rect().expand(12.0);
-                ui.painter().vline(r.left(), r.y_range(), Stroke::new(1.0, theme::BORDER));
+                ui.painter().vline(r.left(), r.y_range(), Stroke::new(1.0, theme::EDGE));
                 progress_panel::show(ui, state, &groups)
             })
             .inner;
@@ -114,10 +114,10 @@ pub fn show(ui: &mut Ui, state: &mut UiState, cache: &mut CommonMarkCache, comma
             .exact_size(w)
             .resizable(false)
             .show_separator_line(false)
-            .frame(egui::Frame::NONE.fill(theme::SIDEBAR).inner_margin(egui::Margin::same(12)))
+            .frame(egui::Frame::NONE.inner_margin(egui::Margin::same(12)))
             .show(ui, |ui| {
                 let r = ui.max_rect().expand(12.0);
-                ui.painter().vline(r.left(), r.y_range(), Stroke::new(1.0, theme::BORDER));
+                ui.painter().vline(r.left(), r.y_range(), Stroke::new(1.0, theme::EDGE));
                 artifacts_panel::show(ui, &mut apanel, cache)
             })
             .inner;
@@ -129,10 +129,11 @@ pub fn show(ui: &mut Ui, state: &mut UiState, cache: &mut CommonMarkCache, comma
     let panel = ui.available_rect_before_wrap();
     let col = Col::for_width(panel.width());
 
-    // Docked composer at the bottom, 8 from the edge, in the reading column.
+    // Docked composer at the bottom, 14 from the card's edge, in the reading column. No fill:
+    // the transcript is clipped above it, and a fill would square the card's corners.
     let dock = egui::Panel::bottom("composer_dock")
         .show_separator_line(false)
-        .frame(egui::Frame::NONE.fill(theme::BG).inner_margin(egui::Margin { left: 0, right: 0, top: 4, bottom: 8 }))
+        .frame(egui::Frame::NONE.inner_margin(egui::Margin { left: 0, right: 0, top: 4, bottom: 14 }))
         .show(ui, |ui| {
             // Place the box on the exact column rect (reference x 314..1013), independent of
             // the panel's own cursor.
@@ -169,54 +170,46 @@ pub fn show(ui: &mut Ui, state: &mut UiState, cache: &mut CommonMarkCache, comma
         ui.ctx().request_discard("the composer changed height");
     }
 
-    // Sticky header strip: conversation title on a card-colored band (reference y 85..118).
-    egui::Panel::top("conversation_header")
-        .show_separator_line(false)
-        .exact_size(HEADER_TOP + HEADER_H + 12.0)
-        .frame(egui::Frame::NONE.fill(theme::BG))
-        .show(ui, |ui| {
-            let m = ui.max_rect();
-            // The strip spans the reading column only (reference x 313..1013).
-            let left = m.left() + col.pad;
-            let strip = Rect::from_min_size(egui::pos2(left, m.top() + HEADER_TOP), Vec2::new(col.w, HEADER_H));
-            // Bottom border only; no fill, so the strip does not read as another card.
-            ui.painter().hline(strip.x_range(), strip.bottom() - 0.5, Stroke::new(1.0, theme::CARD_BORDER));
-            let title = if state.current_title.is_empty() { "Untitled Conversation" } else { state.current_title.as_str() };
-            // Artifacts toggle at the right end of the strip, with the artifact count.
-            let n = apanel.artifacts.len();
-            let reviewing = apanel.pending_review.is_some();
-            let btn = Rect::from_center_size(egui::pos2(strip.right() - 12.0, strip.center().y), Vec2::splat(24.0));
-            let tip = if reviewing { "Review pending" } else if apanel.open { "Hide artifacts" } else { "Show artifacts" };
-            if widgets::overlay_icon(ui, btn, ui.scope_id().with("artifacts_toggle"), icons::FILE_TEXT, tip, n > 0 || apanel.open).clicked() {
-                apanel.open = !apanel.open;
-            }
-            if reviewing {
-                ui.painter().circle_filled(btn.center() + Vec2::new(6.0, -6.0), 3.0, theme::WARNING);
-            }
-            let mut right = btn.left() - 4.0;
-            if n > 0 {
-                let c = if reviewing { theme::WARNING } else { theme::FG_MUTED };
-                let r = ui.painter().text(egui::pos2(right, strip.center().y), Align2::RIGHT_CENTER, n.to_string(), theme::font(12.0), c);
-                right = r.left() - 12.0;
-            }
-            if state.busy {
-                let r = ui.painter().text(egui::pos2(right, strip.center().y), Align2::RIGHT_CENTER, "Working...", theme::font(12.0), theme::FG_MUTED);
-                let sp = Rect::from_center_size(egui::pos2(r.left() - 10.0, strip.center().y), Vec2::splat(12.0));
-                egui::Spinner::new().size(12.0).color(theme::FG_MUTED).paint_at(ui, sp);
-                right = sp.left() - 12.0;
-            }
-            let tr = Rect::from_min_max(strip.min, egui::pos2(right, strip.bottom()));
-            widgets::paint_truncated(ui, tr, title, theme::medium(13.0), theme::FG);
-        });
-
-    let mut scroll = egui::ScrollArea::vertical().id_salt("transcript").stick_to_bottom(true).auto_shrink([false, false]);
+    // The title is in the toolbar's breadcrumb, and the Artifacts toggle beside it, so the
+    // transcript starts at the top of the card.
+    //
+    // A navigator jump chosen last frame: scroll to where that turn's bubble was laid out. A
+    // turn paged out by "Load older messages" is brought back first and reached next frame.
+    // The jump frame is built without stick-to-bottom: an explicit offset would be overwritten
+    // by it at the end of the same frame, and the view would never leave the bottom.
+    let nav_id = pinned_id.with("nav_target");
+    let marks_id = pinned_id.with("nav_marks");
+    let mut jumping = false;
+    let mut jump_to = None;
+    if let Some(target) = ui.data(|d| d.get_temp::<usize>(nav_id)) {
+        let marks: Vec<(usize, f32)> = ui.data(|d| d.get_temp(marks_id)).unwrap_or_default();
+        if let Some(&(_, y)) = marks.iter().find(|(u, _)| *u == target) {
+            jump_to = Some((y - 12.0).max(0.0));
+            ui.data_mut(|d| d.remove_temp::<usize>(nav_id));
+        } else if let Some(item) = state.items.iter().enumerate().filter(|(_, i)| matches!(i, ChatItem::User(_))).nth(target).map(|(i, _)| i) {
+            // The page grows now, and the reset below must not shrink it back in this frame:
+            // the offset is applied next frame, against the page the target is in.
+            jumping = true;
+            state.visible_items = state.visible_items.max(state.items.len() - item);
+            ui.ctx().request_repaint();
+        } else {
+            ui.data_mut(|d| d.remove_temp::<usize>(nav_id));
+        }
+    }
+    let mut scroll = egui::ScrollArea::vertical().id_salt("transcript").stick_to_bottom(jump_to.is_none()).auto_shrink([false, false]);
     if ui.data_mut(|d| d.remove_temp::<bool>(pinned_id.with("jump"))).unwrap_or(false) {
         scroll = scroll.vertical_scroll_offset(f32::MAX);
     }
+    if let Some(y) = jump_to {
+        jumping = true;
+        scroll = scroll.vertical_scroll_offset(y);
+    }
+    let mut marks: Vec<(usize, f32)> = Vec::new();
     let out = scroll.show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.spacing_mut().item_spacing.y = 6.0;
-        transcript(ui, state, cache, commands, col, &groups, &mut apanel);
+        ui.add_space(TRANSCRIPT_TOP);
+        transcript(ui, state, cache, commands, col, &groups, &mut apanel, &mut marks);
         if state.pending_confirm.is_some() {
             ui.add_space(8.0);
             col.show(ui, |ui| confirm::inline(ui, state));
@@ -228,19 +221,39 @@ pub fn show(ui: &mut Ui, state: &mut UiState, cache: &mut CommonMarkCache, comma
     let max = (out.content_size.y - r.height()).max(0.0);
     let offset = out.state.clamped_offset().y;
     let at_bottom = offset >= max - 4.0;
-    // Back at the bottom: drop the extra pages loaded with "Load older messages".
-    if at_bottom && state.visible_items > ITEM_PAGE && ui.ctx().dragged_id().is_none() {
+    // Back at the bottom: drop the extra pages loaded with "Load older messages". Not on the
+    // frame a jump is applied, whose offset was clamped against the page it opened.
+    if at_bottom && !jumping && state.visible_items > ITEM_PAGE && ui.ctx().dragged_id().is_none() {
         state.visible_items = ITEM_PAGE;
     }
 
-    // 24px bg fade above the composer.
+    // 24px bg fade above the composer, and once scrolled, at the card's top edge too, so
+    // messages fade out instead of being cut off.
     let fade = Rect::from_min_max(egui::pos2(r.left(), dock_top - 24.0), egui::pos2(r.right() - 8.0, dock_top));
-    paint_fade(ui, fade);
-
-    // Header separator only when scrolled.
+    paint_fade(ui, fade, false);
     if offset > 1.0 {
-        ui.painter().line_segment([r.left_top(), r.right_top()], Stroke::new(1.0, theme::BORDER));
+        let top = Rect::from_min_max(r.left_top(), egui::pos2(r.right() - 8.0, r.top() + 24.0));
+        paint_fade(ui, top, true);
     }
+
+    // Navigator rail in the left gutter: one dot per turn, the one being read brighter.
+    let turns = navigator::turns(&state.items, &state.prompt_times);
+    if turns.len() >= navigator::MIN_TURNS {
+        let mut tops: Vec<Option<f32>> = vec![None; turns.len()];
+        for &(u, y) in &marks {
+            if let Some(t) = tops.get_mut(u) {
+                *t = Some(y);
+            }
+        }
+        let current = navigator::current_turn(&tops, offset, r.height());
+        let x = r.left() + (col.pad - navigator::RAIL_W).clamp(4.0, 12.0);
+        let rail = Rect::from_min_max(egui::pos2(x, r.top() + 24.0), egui::pos2(x + navigator::RAIL_W, dock_top - 24.0));
+        if let Some(target) = navigator::show(ui, rail, &turns, current) {
+            ui.data_mut(|d| d.insert_temp(nav_id, target));
+            ui.ctx().request_repaint();
+        }
+    }
+    ui.data_mut(|d| d.insert_temp(marks_id, marks));
 
     artifacts_panel::store(&ctx, state.current, apanel);
 
@@ -363,14 +376,17 @@ fn review_banner(ui: &mut Ui, apanel: &mut ArtifactsPanel, state: &mut UiState, 
     panel_action(act, apanel, state, ctx, commands);
 }
 
-fn paint_fade(ui: &Ui, rect: Rect) {
+/// Vertical fade into the card color: towards the bottom edge of `rect`, or towards its top
+/// when `to_top`.
+fn paint_fade(ui: &Ui, rect: Rect, to_top: bool) {
     let mut mesh = egui::Mesh::default();
     let clear = Color32::from_rgba_premultiplied(0, 0, 0, 0);
+    let (top, bottom) = if to_top { (theme::BG, clear) } else { (clear, theme::BG) };
     let i = mesh.vertices.len() as u32;
-    mesh.colored_vertex(rect.left_top(), clear);
-    mesh.colored_vertex(rect.right_top(), clear);
-    mesh.colored_vertex(rect.right_bottom(), theme::BG);
-    mesh.colored_vertex(rect.left_bottom(), theme::BG);
+    mesh.colored_vertex(rect.left_top(), top);
+    mesh.colored_vertex(rect.right_top(), top);
+    mesh.colored_vertex(rect.right_bottom(), bottom);
+    mesh.colored_vertex(rect.left_bottom(), bottom);
     mesh.add_triangle(i, i + 1, i + 2);
     mesh.add_triangle(i, i + 2, i + 3);
     ui.painter().add(mesh);
@@ -422,6 +438,9 @@ fn text_hash(t: &str) -> u32 {
     h ^ (t.len() as u32).wrapping_mul(0x9e37_79b9)
 }
 
+/// The visible items in the reading column. `marks` gets the top of every user bubble laid
+/// out, as `(user_index, y)` in scroll-content coordinates (the navigator's jump targets).
+#[allow(clippy::too_many_arguments)]
 fn transcript(
     ui: &mut Ui,
     state: &mut UiState,
@@ -430,7 +449,9 @@ fn transcript(
     col: Col,
     groups: &Derived,
     apanel: &mut ArtifactsPanel,
+    marks: &mut Vec<(usize, f32)>,
 ) {
+    let origin = ui.max_rect().top();
     let total = state.items.len();
     let start = visible_start(state);
     if start > 0 {
@@ -508,6 +529,7 @@ fn transcript(
         let cur_user_index = if matches!(item, ChatItem::User(_)) {
             let idx_before = user_count;
             user_count += 1;
+            marks.push((idx_before, ui.cursor().top() - origin));
             Some(idx_before)
         } else {
             None
@@ -614,8 +636,7 @@ pub fn banner(ui: &mut Ui, state: &mut UiState, b: &Banner, commands: &mut Vec<U
                                 close = true;
                             }
                             if widgets::text_link(ui, "Open Account", 12.5).clicked() {
-                                state.customize_tab = super::CustomizeTab::Account;
-                                state.navigate(super::View::Customizations);
+                                state.open_customize(super::CustomizeTab::Account);
                                 close = true;
                             }
                         }
@@ -623,8 +644,7 @@ pub fn banner(ui: &mut Ui, state: &mut UiState, b: &Banner, commands: &mut Vec<U
                         // cannot fix that, the profile's key can.
                         Banner::Auth(_) if state.settings.active_provider_profile().is_some() => {
                             if widgets::text_link(ui, "Open Providers", 12.5).clicked() {
-                                state.customize_tab = super::CustomizeTab::Providers;
-                                state.navigate(super::View::Customizations);
+                                state.open_customize(super::CustomizeTab::Providers);
                                 close = true;
                             }
                         }
@@ -847,9 +867,11 @@ fn user_bubble_with_rewind(ui: &mut Ui, idx: usize, text: &str, user_index: usiz
     let col_left = col.left();
     let rewound = ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
         let mut clicked = false;
+        // Right-aligned chat bubble; the corner nearest the edge is tighter.
         let r = egui::Frame::new()
-            .fill(theme::SECONDARY)
-            .corner_radius(theme::RADIUS_BUBBLE)
+            .fill(theme::BUBBLE)
+            .stroke(Stroke::new(1.0, theme::BUBBLE_EDGE))
+            .corner_radius(egui::CornerRadius { nw: theme::RADIUS_BUBBLE, ne: 4, sw: theme::RADIUS_BUBBLE, se: theme::RADIUS_BUBBLE })
             .inner_margin(egui::Margin { left: 14, right: 14, top: 10, bottom: 10 })
             .show(ui, |ui| {
                 ui.set_width(galley.size().x.ceil());
@@ -1264,9 +1286,9 @@ mod tests {
     #[test]
     fn column_is_centered_with_gutter() {
         let c = Col::for_width(1400.0);
-        assert_eq!((c.w, c.pad), (COLUMN_MAX, (1400.0 - COLUMN_MAX) / 2.0));
+        assert_eq!((c.w, c.pad), (theme::COLUMN_WIDTH, (1400.0 - theme::COLUMN_WIDTH) / 2.0));
         let c = Col::for_width(500.0);
-        assert_eq!((c.w, c.pad), (452.0, 24.0));
+        assert_eq!((c.w, c.pad), (436.0, 32.0));
         let c = Col::for_width(100.0);
         assert!(c.w <= 100.0 && c.pad >= 0.0);
     }
@@ -1281,8 +1303,8 @@ mod tests {
         let ctx = context();
         let mut cache = CommonMarkCache::default();
         let mut commands = Vec::new();
-        // Where the header strip's title starts (the column's left edge), and whether the
-        // Progress panel was drawn.
+        // Where the answer starts (the column's left edge), and whether the Progress panel was
+        // drawn.
         let mut column = |items: &[ChatItem], open: bool| {
             let mut state = UiState { items: items.to_vec(), current_title: "Greeting".into(), progress_open: open, ..UiState::default() };
             let mut texts = Vec::new();
@@ -1291,15 +1313,15 @@ mod tests {
                     egui::CentralPanel::default().show(ui, |ui| show(ui, &mut state, &mut cache, &mut commands));
                 });
             }
-            let title = texts.iter().find(|(t, _)| t == "Greeting").map(|(_, r)| r.left()).expect("the header strip");
-            (title, texts.iter().any(|(t, _)| t == "Progress"))
+            let answer = texts.iter().find(|(t, _)| t == "Hi!").map(|(_, r)| r.left()).expect("the answer");
+            (answer, texts.iter().any(|(t, _)| t == "Progress"))
         };
         let chat = [ChatItem::User("hello there".into()), ChatItem::TurnHeader { duration: None }, ChatItem::Assistant("Hi!".into())];
         let mut tools = chat.to_vec();
         tools.splice(2..2, [tool_item(true), tool_item(false)]);
 
         let (before, _) = column(&chat, false);
-        assert!((before - (1160.0 - COLUMN_MAX) / 2.0).abs() < 3.0, "a full, centered column: {before}");
+        assert!((before - (1160.0 - theme::COLUMN_WIDTH) / 2.0).abs() < 3.0, "a full, centered column: {before}");
         let (during, drawn) = column(&tools, false);
         assert_eq!(during, before, "the column moved when the tools ran");
         assert!(!drawn, "the steps stay in the closed panel");
@@ -1439,7 +1461,7 @@ mod tests {
         painted(&ctx, vec![egui::Event::PointerMoved(link), click(link, true)], |ui| banner(ui, &mut state, &b, &mut commands));
         painted(&ctx, vec![click(link, false)], |ui| banner(ui, &mut state, &b, &mut commands));
         assert!(commands.is_empty(), "no Google sign-in starts");
-        assert_eq!((state.view, state.customize_tab), (crate::ui::View::Customizations, crate::ui::CustomizeTab::Providers));
+        assert_eq!((state.customize_open, state.customize_tab), (true, crate::ui::CustomizeTab::Providers));
         assert_eq!(state.banner, None);
 
         // Code Assist offers the Antigravity sign-in, and — the Gemini CLI client being
@@ -1485,7 +1507,7 @@ mod tests {
         state.banner = Some(b.clone());
         let sent = click_link(&ctx, &mut state, &b, "Open Account");
         assert!(sent.is_empty());
-        assert_eq!((state.view, state.customize_tab), (crate::ui::View::Customizations, crate::ui::CustomizeTab::Account));
+        assert_eq!((state.customize_open, state.customize_tab), (true, crate::ui::CustomizeTab::Account));
 
         // No account and no profile in use: still not the Google flow but the Antigravity
         // sign-in, which works without a client secret.

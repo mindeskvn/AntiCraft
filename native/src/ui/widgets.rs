@@ -20,8 +20,8 @@ pub fn nav_row(ui: &mut Ui, icon: &str, label: &str, selected: bool, enabled: bo
     nav_row_impl(ui, icon, label, selected, enabled, false)
 }
 
-/// Like [`nav_row`], but unselected it is drawn as a boxed field (`#1c1c1c`, 1px `#282828`),
-/// as the reference does for "New Conversation" outside Home.
+/// Like [`nav_row`], but drawn as a boxed button (`#1c1c1f`, 1px `#29292c`), as the reference
+/// draws "New Conversation". Its text is bright whether or not it is selected.
 pub fn nav_row_boxed(ui: &mut Ui, icon: &str, label: &str, selected: bool, enabled: bool) -> Response {
     nav_row_impl(ui, icon, label, selected, enabled, true)
 }
@@ -32,11 +32,12 @@ fn nav_row_impl(ui: &mut Ui, icon: &str, label: &str, selected: bool, enabled: b
     let (rect, r) = ui.allocate_exact_size(Vec2::new(w, 30.0), sense);
     let t = hover_t(ui, &r);
     let p = ui.painter();
-    let mut text = if selected { theme::FG } else { lerp(theme::FG_SECONDARY, theme::FG, t) };
-    if selected {
+    let mut text = if selected || boxed { theme::FG } else { lerp(theme::FG_SECONDARY, theme::FG, t) };
+    if boxed {
+        let fill = if selected { theme::ROW_SELECTED } else { lerp(theme::BOX_FILL, theme::SECONDARY, t) };
+        p.rect(rect, 8, fill, Stroke::new(1.0, theme::FIELD_BORDER), StrokeKind::Inside);
+    } else if selected {
         p.rect(rect, 6, theme::ROW_SELECTED, Stroke::new(1.0, theme::ROW_SELECTED_EDGE), StrokeKind::Inside);
-    } else if boxed {
-        p.rect(rect, 6, lerp(theme::CARD, theme::SECONDARY, t), Stroke::new(1.0, theme::FIELD_BORDER), StrokeKind::Inside);
     } else if enabled && t > 0.0 {
         p.rect_filled(rect, 8, theme::ROW_HOVER.gamma_multiply(t));
     }
@@ -121,6 +122,38 @@ pub fn pill_chip(ui: &mut Ui, icon: Option<&str>, label: &str, caret: bool, enab
         p.text(egui::pos2(x, rect.center().y), Align2::LEFT_CENTER, super::icons::CARET_DOWN, theme::icon(11.0), c);
     }
     r
+}
+
+/// Chip of the message box's controls row (28 h): optional icon, label, and an upward caret,
+/// since its menu opens above the box.
+pub fn pill_chip_up(ui: &mut Ui, icon: Option<&str>, label: &str, enabled: bool) -> Response {
+    let font = theme::font(12.5);
+    let galley = ui.painter().layout_no_wrap(label.to_owned(), font, theme::FG_SECONDARY);
+    let w = galley.size().x + 16.0 + if icon.is_some() { 19.0 } else { 0.0 } + 15.0;
+    let (rect, r) = ui.allocate_exact_size(Vec2::new(w, 28.0), if enabled { Sense::click() } else { Sense::hover() });
+    let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&r));
+    let t = hover_t(ui, &r).max(if open { 1.0 } else { 0.0 });
+    let p = ui.painter();
+    if enabled && t > 0.0 {
+        p.rect_filled(rect, 8, theme::SECONDARY.gamma_multiply(t));
+    }
+    let mut c = lerp(theme::FG_SECONDARY, theme::FG, t);
+    if !enabled {
+        c = c.gamma_multiply(0.4);
+    }
+    let mut x = rect.left() + 8.0;
+    if let Some(i) = icon {
+        p.text(egui::pos2(x, rect.center().y), Align2::LEFT_CENTER, i, theme::icon(14.0), c);
+        x += 19.0;
+    }
+    p.galley(egui::pos2(x, rect.center().y - galley.size().y / 2.0), galley.clone(), c);
+    x += galley.size().x + 5.0;
+    p.text(egui::pos2(x, rect.center().y), Align2::LEFT_CENTER, super::icons::CARET_UP, theme::icon(10.0), c);
+    if enabled {
+        r.on_hover_cursor(egui::CursorIcon::PointingHand)
+    } else {
+        r
+    }
 }
 
 /// Pill toggle 36x20 bound to `on`. Returns true when changed.
@@ -220,9 +253,10 @@ pub fn popup_menu<R>(anchor: &Response, width: f32, add: impl FnOnce(&mut Ui) ->
 }
 
 
-/// Send / stop button (28x26 rounded square): grey when empty, light when `ready`, Stop while `busy`.
+/// Send / stop button: a 28px circle, white with a dark arrow when there is something to send,
+/// dim when the box is empty, and a stop square while a turn runs.
 pub fn send_button(ui: &mut Ui, busy: bool, ready: bool) -> Response {
-    let (rect, r) = ui.allocate_exact_size(Vec2::new(28.0, 26.0), Sense::click());
+    let (rect, r) = ui.allocate_exact_size(Vec2::splat(28.0), Sense::click());
     let active = busy || ready;
     let (mut bg, fg, icon) = if busy {
         (theme::FG, theme::BG, super::icons::STOP)
@@ -235,8 +269,8 @@ pub fn send_button(ui: &mut Ui, busy: bool, ready: bool) -> Response {
         bg = Color32::WHITE;
     }
     let p = ui.painter();
-    p.rect_filled(rect, 8, bg);
-    p.text(rect.center(), Align2::CENTER_CENTER, icon, theme::icon(if busy { 13.0 } else { 14.0 }), fg);
+    p.circle_filled(rect.center(), 13.0, bg);
+    p.text(rect.center(), Align2::CENTER_CENTER, icon, theme::icon(if busy { 12.0 } else { 14.0 }), fg);
     if active {
         r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(if busy { "Stop" } else { "Send (Enter)" })
     } else {
@@ -342,6 +376,45 @@ pub fn segmented<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, options: &[(T,
         }
         let c = if active { theme::FG } else { theme::FG_MUTED };
         ui.painter().text(rect.center(), Align2::CENTER_CENTER, *l, theme::font(12.0), c);
+        if r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() && !active {
+            *value = *v;
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// [`segmented`] whose options can be unavailable: drawn dim, not clickable, with `why` on hover.
+pub fn segmented_some<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, options: &[(T, &str, bool)], why: &str) -> bool {
+    let mut changed = false;
+    let widths: Vec<f32> = options.iter().map(|(_, l, _)| ui.painter().layout_no_wrap((*l).to_owned(), theme::font(12.0), theme::FG).size().x + 20.0).collect();
+    let total: f32 = widths.iter().sum::<f32>() + 4.0;
+    let (track, _) = ui.allocate_exact_size(Vec2::new(total, 26.0), Sense::hover());
+    ui.painter().rect_filled(track, 6, theme::FIELD_BG);
+    ui.painter().rect_stroke(track, 6, Stroke::new(1.0, theme::CARD_BORDER), StrokeKind::Inside);
+    let mut x = track.left() + 2.0;
+    for (i, (v, l, available)) in options.iter().enumerate() {
+        let rect = Rect::from_min_size(egui::pos2(x, track.top() + 2.0), Vec2::new(widths[i], 22.0));
+        x += widths[i];
+        let r = ui.interact(rect, ui.scope_id().with(("seg", i, *l)), if *available { Sense::click() } else { Sense::hover() });
+        let active = *value == *v;
+        if active {
+            ui.painter().rect_filled(rect, 4, theme::SECONDARY);
+        } else if *available && r.hovered() {
+            ui.painter().rect_filled(rect, 4, theme::ROW_HOVER);
+        }
+        let c = if active {
+            theme::FG
+        } else if *available {
+            theme::FG_MUTED
+        } else {
+            theme::FG_MUTED.gamma_multiply(0.45)
+        };
+        ui.painter().text(rect.center(), Align2::CENTER_CENTER, *l, theme::font(12.0), c);
+        if !*available {
+            r.on_hover_text(why);
+            continue;
+        }
         if r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() && !active {
             *value = *v;
             changed = true;

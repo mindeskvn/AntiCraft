@@ -1742,6 +1742,7 @@ mod tests {
 
     /// An agent whose normal backend and bypass route answer from one script of `rounds` tool
     /// calls and then a final answer. Only the route's requests are recorded.
+    #[allow(clippy::type_complexity)]
     fn bypass_agent(dir: &std::path::Path, requests: u32, rounds: usize) -> (Agent, Arc<Mutex<Vec<(String, String)>>>) {
         std::fs::write(dir.join("a.txt"), "hello").unwrap();
         let tool_round: Vec<Part> = vec![call("read_file", json!({"file_path":"a.txt"}))];
@@ -1819,8 +1820,10 @@ mod tests {
         assert!(r.contents.is_empty(), "nothing is added to the history");
 
         // Appended to an instruction that is already there.
-        let mut r = GenerateContentRequest::default();
-        r.system_instruction = Some(Content { role: Some(Role::User), parts: vec![Part::text("base")] });
+        let mut r = GenerateContentRequest {
+            system_instruction: Some(Content { role: Some(Role::User), parts: vec![Part::text("base")] }),
+            ..Default::default()
+        };
         add_bypass_instructions(&mut r, "more");
         let system = r.system_instruction.as_ref().unwrap().parts[0].text.as_deref().unwrap();
         assert!(system.starts_with("base") && system.contains("more"), "{system}");

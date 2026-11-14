@@ -1,15 +1,18 @@
 //! Model picker (DESIGN.md 2.6, `_ref/ui/04-model-menu.png`): text chip in the composer that
 //! opens a compact model list just below it (flips upward when there is no room).
 //!
+//! In the message box the menu starts with the agent: Planning or Fast, for this conversation.
+//!
 //! The list is grouped by backend. Every signed-in subscription account gets a group of its
 //! models (headed by the account, "Current" on the one in use), and so does every provider profile
-//! with models loaded (Customizations > Providers > Edit > Load models). The Code Assist models
+//! with models loaded (Settings > Providers > Edit > Load models). The Code Assist models
 //! follow while Code Assist sends turns, or can (a Google sign-in). Picking a model of another
 //! backend also puts that backend in use: that is how the composer switches between them.
 
 use egui::{Align2, Sense, Ui, Vec2};
 
 use super::{format, icons, theme, UiAction, UiState};
+use crate::agent::policy::AgentMode;
 use crate::app::AppCommand;
 use crate::auth::external::{catalog, valid_model_id};
 use crate::auth::AuthStatus;
@@ -22,8 +25,10 @@ const ACCOUNT_MENU_WIDTH: f32 = 300.0;
 const MENU_MAX_H: f32 = 440.0;
 const ROW_H: f32 = 23.0;
 const HEADER_H: f32 = 20.0;
-const HEADER_COLOR: egui::Color32 = egui::Color32::from_rgb(0x6e, 0x6e, 0x6e);
-const ROW_HOVER_FILL: egui::Color32 = egui::Color32::from_rgb(0x2d, 0x2d, 0x2d);
+const HEADER_COLOR: egui::Color32 = theme::FG_MUTED;
+const ROW_HOVER_FILL: egui::Color32 = theme::SECONDARY;
+/// Height of an agent row.
+const AGENT_ROW_H: f32 = 26.0;
 
 /// Widest provider model id the chip shows in full; a longer one is cut with an ellipsis (the
 /// tooltip has all of it), so the send button stays on the composer row.
@@ -74,7 +79,19 @@ pub enum Pick {
 /// which sign-in sends the turn is the first thing it says, and the account itself is in the
 /// tooltip and the sidebar. A provider profile in use is named the same way, by its label; one
 /// whose model was never chosen says "Choose model". Every backend's models are in the menu.
+#[cfg(test)]
 pub fn show(ui: &mut Ui, state: &mut UiState, commands: &mut Vec<UiAction>) {
+    chip(ui, state, commands, None);
+}
+
+/// The message box's chip: the model, then the agent (`mode`) in muted text, and a menu that
+/// starts with the agent rows. Returns the agent picked. The agent can change during a turn
+/// (the next request uses it); the model cannot, so its groups wait for the turn to end.
+pub fn show_with_agent(ui: &mut Ui, state: &mut UiState, commands: &mut Vec<UiAction>, mode: AgentMode) -> Option<AgentMode> {
+    chip(ui, state, commands, Some(mode))
+}
+
+fn chip(ui: &mut Ui, state: &mut UiState, commands: &mut Vec<UiAction>, agent: Option<AgentMode>) -> Option<AgentMode> {
     if let Some(entry) = state.settings.active_account_entry() {
         let provider = entry.provider.label();
         let name = if entry.label.trim().is_empty() { provider } else { entry.label.trim() };
@@ -85,15 +102,13 @@ pub fn show(ui: &mut Ui, state: &mut UiState, commands: &mut Vec<UiAction>) {
         } else {
             format!("{model} on the {provider} account {name}. Choose another model or account.")
         };
-        chip_with_menu(ui, state, commands, &label, &tip);
-        return;
+        return chip_with_menu(ui, state, commands, &label, &tip, agent);
     }
     if let Some((label, tip)) = state.settings.active_provider_profile().map(profile_chip) {
-        chip_with_menu(ui, state, commands, &label, &tip);
-        return;
+        return chip_with_menu(ui, state, commands, &label, &tip, agent);
     }
     let label = format::model_label(&state.settings.model);
-    chip_with_menu(ui, state, commands, &label, "Choose model");
+    chip_with_menu(ui, state, commands, &label, "Choose model", agent)
 }
 
 /// The chip's text and tooltip while `profile` sends turns.
@@ -105,14 +120,18 @@ fn profile_chip(profile: &crate::providers::ProviderProfile) -> (String, String)
     }
 }
 
-/// The chip with a caret and the grouped menu under it.
-fn chip_with_menu(ui: &mut Ui, state: &mut UiState, commands: &mut Vec<UiAction>, label: &str, tip: &str) {
-    let enabled = !state.busy;
+/// The chip with a caret and the grouped menu under it. With `agent`, the chip also names the
+/// agent and the menu starts with the agent rows; the agent picked is returned.
+fn chip_with_menu(ui: &mut Ui, state: &mut UiState, commands: &mut Vec<UiAction>, label: &str, tip: &str, agent: Option<AgentMode>) -> Option<AgentMode> {
+    let models_enabled = !state.busy;
+    let enabled = models_enabled || agent.is_some();
     let font = theme::font(12.5);
     let full_w = ui.painter().layout_no_wrap(label.to_owned(), font.clone(), theme::FG_SECONDARY).size().x;
     // An account name can be long; the chip keeps the send button on the composer row.
     let gw = full_w.min(PROVIDER_CHIP_MAX_W);
-    let (rect, r) = ui.allocate_exact_size(Vec2::new(gw + 30.0, 28.0), if enabled { Sense::click() } else { Sense::hover() });
+    let agent_label = agent.map(|m| super::composer::mode_label(m).1);
+    let aw = agent_label.map_or(0.0, |a| ui.painter().layout_no_wrap(a.to_owned(), font.clone(), theme::FG_MUTED).size().x + 6.0);
+    let (rect, r) = ui.allocate_exact_size(Vec2::new(gw + aw + 30.0, 28.0), if enabled { Sense::click() } else { Sense::hover() });
     let popup_id = egui::Popup::default_response_id(&r);
     let asked = std::mem::take(&mut state.open_model_menu) && enabled;
     if asked {
@@ -131,18 +150,27 @@ fn chip_with_menu(ui: &mut Ui, state: &mut UiState, commands: &mut Vec<UiAction>
     }
     let text = egui::Rect::from_min_size(egui::pos2(rect.left() + 8.0, rect.top()), Vec2::new(gw, rect.height()));
     if full_w > gw {
-        super::widgets::paint_truncated(ui, text, label, font, c);
+        super::widgets::paint_truncated(ui, text, label, font.clone(), c);
     } else {
-        ui.painter().text(text.left_center(), Align2::LEFT_CENTER, label, font, c);
+        ui.painter().text(text.left_center(), Align2::LEFT_CENTER, label, font.clone(), c);
     }
-    ui.painter().text(egui::pos2(rect.left() + 12.0 + gw, rect.center().y + 1.0), Align2::LEFT_CENTER, icons::CARET_DOWN, theme::icon(10.0), c);
+    if let Some(a) = agent_label {
+        let muted = if enabled { theme::FG_MUTED } else { theme::FG_MUTED.gamma_multiply(0.5) };
+        ui.painter().text(egui::pos2(text.right() + 6.0, rect.center().y), Align2::LEFT_CENTER, a, font, muted);
+    }
+    // The message box sits at the bottom of the window, so its menus open upward.
+    let caret = if agent.is_some() { icons::CARET_UP } else { icons::CARET_DOWN };
+    ui.painter().text(egui::pos2(rect.left() + 12.0 + gw + aw, rect.center().y + 1.0), Align2::LEFT_CENTER, caret, theme::icon(10.0), c);
     let r = if !enabled {
         r.on_hover_text("The model cannot change during a turn")
     } else if open {
         r
+    } else if agent.is_some() {
+        r.on_hover_text(format!("{tip}\nAgent: {}", agent_label.unwrap_or_default()))
     } else {
         r.on_hover_text(tip)
     };
+    let mut agent_pick = None;
     // Wider once a group header names an account or a provider.
     let width = if menu_groups(state).iter().any(|g| g.source != Source::CodeAssist) { ACCOUNT_MENU_WIDTH } else { MENU_WIDTH };
     // The reference popup's left edge sits 32px inside the composer (11px left of our chip).
@@ -155,6 +183,18 @@ fn chip_with_menu(ui: &mut Ui, state: &mut UiState, commands: &mut Vec<UiAction>
         .frame(popup_frame())
         .show(|ui| {
             ui.set_width(width - 2.0);
+            if let Some(mode) = agent {
+                agent_pick = agent_rows(ui, mode);
+                if agent_pick.is_some() {
+                    ui.close();
+                }
+                separator(ui);
+                if !models_enabled {
+                    let (rr, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), ROW_H + 4.0), Sense::hover());
+                    ui.painter().text(egui::pos2(rr.left() + 10.0, rr.center().y), Align2::LEFT_CENTER, "The model can change once the turn ends", theme::font(12.0), theme::FG_MUTED);
+                    return;
+                }
+            }
             let picked = egui::ScrollArea::vertical().id_salt("model_menu_list").max_height(MENU_MAX_H).show(ui, |ui| menu_groups_click(ui, state, opening)).inner;
             if let Some(pick) = picked {
                 match pick {
@@ -175,6 +215,40 @@ fn chip_with_menu(ui: &mut Ui, state: &mut UiState, commands: &mut Vec<UiAction>
                 ui.close();
             }
         });
+    agent_pick
+}
+
+/// The agent rows at the top of the message box's menu. Returns the agent clicked, if it is
+/// not the one in use.
+fn agent_rows(ui: &mut Ui, mode: AgentMode) -> Option<AgentMode> {
+    let mut picked = None;
+    ui.spacing_mut().item_spacing.y = 0.0;
+    ui.add_space(4.0);
+    group_header(ui, "Agent", false);
+    for (m, note, tip) in [
+        (AgentMode::Planning, "Plans, then builds", "Research, write a plan you can review, then build it"),
+        (AgentMode::Fast, "Acts right away", "Act right away, for quick and simple tasks"),
+    ] {
+        let (icon, label) = super::composer::mode_label(m);
+        let selected = m == mode;
+        let (rect, r) = ui.allocate_exact_size(Vec2::new(ui.available_width(), AGENT_ROW_H), Sense::click());
+        let p = ui.painter();
+        if selected || r.hovered() {
+            p.rect_filled(rect.shrink2(Vec2::new(5.0, 1.0)), 4, ROW_HOVER_FILL);
+        }
+        let c = if selected || r.hovered() { theme::FG } else { theme::FG_SECONDARY };
+        p.text(egui::pos2(rect.left() + 12.0, rect.center().y), Align2::LEFT_CENTER, icon, theme::icon(13.0), c);
+        let l = p.text(egui::pos2(rect.left() + 32.0, rect.center().y), Align2::LEFT_CENTER, label, theme::font(13.0), c);
+        p.text(egui::pos2(l.right() + 8.0, rect.center().y), Align2::LEFT_CENTER, note, theme::font(11.5), theme::FG_MUTED);
+        if selected {
+            p.text(egui::pos2(rect.right() - 12.0, rect.center().y), Align2::RIGHT_CENTER, icons::CHECK, theme::icon(13.0), theme::FG);
+        }
+        if r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(tip).clicked() && !selected {
+            picked = Some(m);
+        }
+    }
+    ui.add_space(4.0);
+    picked
 }
 
 /// Whether the menu `popup_id` should scroll to the model in use this frame: from the frame it is
@@ -302,7 +376,7 @@ pub fn menu_groups_click(ui: &mut Ui, state: &UiState, opening: bool) -> Option<
     draw_groups(ui, state, &menu_groups(state), opening, false)
 }
 
-/// The Customizations "Default model" row: every account and provider group, then always the
+/// The Settings "Default model" row: every account and provider group, then always the
 /// Code Assist list. The row sets the Code Assist model even while another backend sends turns,
 /// so that model keeps its check there, and a model of another backend can be picked too.
 pub fn default_model_click(ui: &mut Ui, state: &UiState, opening: bool) -> Option<Pick> {
@@ -467,7 +541,7 @@ fn row(ui: &mut Ui, state: &UiState, c: &format::ModelChoice, check: bool, scrol
         p.text(egui::pos2(rect.right() - 12.0, rect.center().y), Align2::RIGHT_CENTER, icons::CHECK, theme::icon(13.0), theme::FG);
     }
     if !enabled {
-        r.on_hover_text("Enable preview access in Customizations");
+        r.on_hover_text("Enable preview access in Settings");
         return None;
     }
     let id = if c.alias { resolve_model(&c.id, s.preview_access, s.latest_flash_ga) } else { c.id.clone() };
@@ -593,7 +667,7 @@ mod tests {
 
         let (_, commands) = click_chip_menu(&mut state, "Work · Choose model", "Load models…");
         assert!(matches!(commands.as_slice(), [AppCommand::LoadProviderModels { profile, .. }] if profile.api_key == "k-test"), "{commands:?}");
-        assert_eq!((state.view, state.customize_tab), (crate::ui::View::Customizations, crate::ui::CustomizeTab::Providers));
+        assert_eq!((state.customize_open, state.customize_tab), (true, crate::ui::CustomizeTab::Providers));
         assert!(state.provider_dialog.as_ref().is_some_and(|d| d.editing.as_deref() == Some("p1") && d.loading.is_some()), "its dialog is open, loading");
     }
 

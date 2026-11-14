@@ -188,7 +188,7 @@ pub struct ProviderProfile {
     /// under. `None` means [`ProviderKind::default_context_window`].
     #[serde(default, skip_serializing_if = "Option::is_none", alias = "context_window")]
     pub context_window: Option<u64>,
-    /// What the provider listed the last time its models were loaded (Customizations >
+    /// What the provider listed the last time its models were loaded (Settings >
     /// Providers > Load models). The composer's model menu offers these.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<String>,

@@ -942,7 +942,7 @@ mod tests {
         let child = AgentChildRunner::child_config(&cfg, json!({"type": "object"}));
         assert!(child.bypass.is_none(), "the child must not route through the bypass provider");
         // Everything else a child needs is still its own.
-        assert!(child.can_confirm == false && child.finish_schema.is_some());
+        assert!(!child.can_confirm && child.finish_schema.is_some());
         assert!(child.session_id.starts_with("s-wf-"));
     }
 

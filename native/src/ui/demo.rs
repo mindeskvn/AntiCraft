@@ -129,8 +129,7 @@ fn signed_in_accounts(s: &mut UiState) {
 /// Claude's sign-in rows idle, and a Codex sign-in that stopped on a busy port. That attempt is
 /// kept, so its row offers "Paste redirect link" under the error.
 fn accounts_state(s: &mut UiState) {
-    s.view = View::Customizations;
-    s.customize_tab = CustomizeTab::Account;
+    s.open_customize(CustomizeTab::Account);
     s.back = vec![View::Chat];
     let error = "port 1455 on localhost is already in use by another program. Close it and try again, or paste the redirect link instead";
     s.account_errors.insert(AccountProvider::Codex, error.into());
@@ -213,6 +212,24 @@ fn providers_state(s: &mut UiState) {
 
 fn conversation_items() -> Vec<ChatItem> {
     vec![
+        ChatItem::User("Where does the CSV export live, and which table does it read?".into()),
+        ChatItem::TurnHeader { duration: Some(Duration::from_secs(9)) },
+        ChatItem::Tool(ToolCard {
+            call_id: "0a".into(),
+            name: "read_file".into(),
+            args: serde_json::json!({"file_path": "scripts/export.py"}),
+            result: Some((true, "Read 42 lines".into())),
+        }),
+        ChatItem::Assistant("It is `scripts/export.py`, and it reads the `customers` table. The report the team downloads is written from that file.".into()),
+        ChatItem::User("Thanks. Add a --check flag that exports to a temp file and reports the row count.".into()),
+        ChatItem::TurnHeader { duration: Some(Duration::from_secs(24)) },
+        ChatItem::Tool(ToolCard {
+            call_id: "0b".into(),
+            name: "replace".into(),
+            args: serde_json::json!({"file_path": "scripts/export.py"}),
+            result: Some((true, "Applied".into())),
+        }),
+        ChatItem::Assistant("Done: `python scripts/export.py --check` now writes to a temp file, compares the row count with the table and prints both.".into()),
         ChatItem::User(r#"The CSV export garbles Vietnamese names ("Nguyá»…n" instead of "Nguyễn"). Can you fix the encoding?"#.into()),
         ChatItem::TurnHeader { duration: Some(Duration::from_secs(62)) },
         ChatItem::Thought {
@@ -398,8 +415,7 @@ pub fn state(name: &str) -> Option<UiState> {
         "accounts" => accounts_state(&mut s),
         "accounts-models" => accounts_models_state(&mut s),
         "providers" | "provider-add" | "provider-dialog" => {
-            s.view = View::Customizations;
-            s.customize_tab = CustomizeTab::Providers;
+            s.open_customize(CustomizeTab::Providers);
             s.back = vec![View::Chat];
             providers_state(&mut s);
             if name == "provider-add" {
@@ -417,10 +433,9 @@ pub fn state(name: &str) -> Option<UiState> {
             s.open_model_menu = true;
         }
         "bypass" => {
-            // Customizations > Tools and approvals, scrolled to Bypass Mode: switched on, its
-            // provider picked, three requests, two instruction files.
-            s.view = View::Customizations;
-            s.customize_tab = CustomizeTab::Agent;
+            // Settings > Tools and approvals, on Bypass Mode: switched on, its provider picked,
+            // three requests, two instruction files.
+            s.open_customize(CustomizeTab::Agent);
             s.back = vec![View::Chat];
             providers_state(&mut s);
             s.settings.bypass.enabled = true;
@@ -448,6 +463,13 @@ pub fn state(name: &str) -> Option<UiState> {
             s.current = Some(c.id);
             s.current_title = c.title.clone();
             s.items = conversation_items();
+            let now = chrono::Utc::now();
+            s.prompt_times = [
+                (0, now - chrono::Duration::days(1)),
+                (1, now - chrono::Duration::hours(3)),
+                (2, now - chrono::Duration::minutes(4)),
+            ]
+            .into();
             s.busy = true;
             s.running = Some(c.id);
             s.pending_confirm = Some(pending_edit());
@@ -497,8 +519,7 @@ pub fn state(name: &str) -> Option<UiState> {
             s.back = vec![View::Chat];
         }
         "customizations" => {
-            s.view = View::Customizations;
-            s.customize_tab = CustomizeTab::General;
+            s.open_customize(CustomizeTab::General);
             s.back = vec![View::Chat];
         }
         other => return orchestration_state(other),
@@ -535,16 +556,26 @@ mod tests {
         assert!(super::state("nope").is_none());
     }
 
-    /// Draw the Customizations page of `s` for `frames` frames; the texts of the last one.
+    /// Draw the Settings overlay of `s` for `frames` frames; the texts of the last one.
     fn page(s: &mut UiState, frames: usize) -> Vec<(String, egui::Rect)> {
         let ctx = context();
         let mut commands = Vec::new();
         let mut texts = Vec::new();
         for _ in 0..frames {
-            texts = painted(&ctx, Vec::new(), |ui| {
-                egui::CentralPanel::default().show(ui, |ui| crate::ui::customizations::show(ui, s, &mut commands));
-            });
+            texts = painted(&ctx, Vec::new(), |_ui| crate::ui::customizations::overlay(&ctx, s, &mut commands));
         }
+        assert!(commands.is_empty(), "a demo screen sends nothing by being drawn");
+        texts
+    }
+
+    /// The sections of `s`, unclipped, on a canvas tall enough for the longest tab. The overlay
+    /// card scrolls them; a test reading a row below its fold reads it here.
+    fn deep_page(s: &mut UiState) -> Vec<(String, egui::Rect)> {
+        let ctx = context();
+        let mut commands = Vec::new();
+        let texts = crate::ui::test_util::painted_in(&ctx, egui::vec2(1400.0, 2600.0), Vec::new(), |ui| {
+            egui::CentralPanel::default().show(ui, |ui| crate::ui::customizations::sections(ui, s, &mut commands));
+        });
         assert!(commands.is_empty(), "a demo screen sends nothing by being drawn");
         texts
     }
@@ -558,7 +589,7 @@ mod tests {
         // Every account is valid as settings keep them, so the screens show what the app can.
         let s = super::state("accounts").unwrap();
         assert_eq!(s.settings.clone().sanitized().accounts, s.settings.accounts);
-        assert_eq!((s.view, s.customize_tab), (View::Customizations, CustomizeTab::Account));
+        assert_eq!((s.customize_open, s.customize_tab), (true, CustomizeTab::Account));
 
         let mut s = super::state("accounts").unwrap();
         let texts = page(&mut s, 2);
@@ -571,11 +602,17 @@ mod tests {
             "port 1455 on localhost is already in use",
             "Paste redirect link",
             "Sign in with your Claude Code account.",
-            "These are consumer subscription sign-ins.",
             "Model list last checked ",
+            "Settings",
+            "Search settings",
+            "Tools and approvals",
         ] {
             assert!(shows(&texts, part), "{part:?} missing from {texts:?}");
         }
+        // The Account tab is taller than the card: the terms note is below the fold, and the
+        // sections render it unclipped on a tall canvas.
+        let deep = deep_page(&mut s);
+        assert!(shows(&deep, "These are consumer subscription sign-ins."), "{deep:?}");
 
         let mut s = super::state("accounts-models").unwrap();
         // The popup opens on the first frame and is drawn from the next one.

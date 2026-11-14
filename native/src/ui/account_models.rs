@@ -1,4 +1,4 @@
-//! The supported-models popup of a subscription account (Customizations > Account, "Models").
+//! The supported-models popup of a subscription account (Settings > Account, "Models").
 //!
 //! Modeled on the user's KiroTool popup: a title naming the account, a count line ("Supports
 //! N/M models · updated HH:MM") beside a "Check again" button, and one pill per model, green when

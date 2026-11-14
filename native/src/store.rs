@@ -115,6 +115,11 @@ pub struct Conversation {
     /// Artifact metadata (content lives in `{id}/artifacts/`, see [`ArtifactStore`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifacts: Vec<ArtifactMeta>,
+    /// When each prompt was sent, by user bubble index (`ui::user_bubble_count` before it).
+    /// Recorded from 0.10 on; older conversations, and steering typed during a turn, have
+    /// no entry, and the navigator then shows no time for that turn.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub prompt_times: std::collections::BTreeMap<usize, DateTime<Utc>>,
 }
 
 impl Conversation {
@@ -129,6 +134,7 @@ impl Conversation {
             updated_at: now,
             messages: Vec::new(),
             artifacts: Vec::new(),
+            prompt_times: std::collections::BTreeMap::new(),
         }
     }
 

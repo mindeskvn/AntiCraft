@@ -74,11 +74,12 @@ pub fn backend_model_id(model: &str, latest_flash_ga: bool) -> String {
 /// Current `settings.json` schema version.
 ///
 /// 0 (absent): written before the policy fields. 1: policy fields. 2: `providers` and
-/// `active_provider`. 3: `accounts` and `active_account`. 4: `bypass`. Nothing branches on the
+/// `active_provider`. 3: `accounts` and `active_account`. 4: `bypass`. 5: `appearance`. Nothing
+/// branches on the
 /// number — a missing field is covered by `#[serde(default)]` on the struct, and the version is
 /// rewritten on the next save — but a bump records that an older file silently gains the defaults
 /// instead of being mistaken for current.
-pub const SETTINGS_VERSION: u32 = 4;
+pub const SETTINGS_VERSION: u32 = 5;
 
 /// Old or CLI-style key -> current key, applied by [`Settings::from_json`].
 const LEGACY_KEYS: &[(&str, &str)] = &[
@@ -219,6 +220,7 @@ pub fn merge_unsent(base: &Settings, local: &Settings, echo: &Settings) -> Setti
         version: _,
         model: _,
         theme: _,
+        appearance: _,
         workspace_history: _,
         auto_approve_read_tools: _,
         shell_timeout_secs: _,
@@ -256,6 +258,7 @@ pub fn merge_unsent(base: &Settings, local: &Settings, echo: &Settings) -> Setti
         version,
         model,
         theme,
+        appearance,
         workspace_history,
         auto_approve_read_tools,
         shell_timeout_secs,
@@ -379,6 +382,59 @@ pub enum Theme {
     Light,
 }
 
+/// Settings > Appearance: how wide the conversation is and which font, at which size, the
+/// window's text uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct Appearance {
+    pub width: ConversationWidth,
+    pub font: UiFont,
+    pub font_size: FontSize,
+}
+
+/// Widest the reading column gets: 768 px, 960 px (the default, as in the reference), or the
+/// whole card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ConversationWidth {
+    Default,
+    #[default]
+    Wide,
+    Fill,
+}
+
+impl ConversationWidth {
+    /// Column width in points, `None` for the whole card.
+    pub fn max(self) -> Option<f32> {
+        match self {
+            ConversationWidth::Default => Some(768.0),
+            ConversationWidth::Wide => Some(960.0),
+            ConversationWidth::Fill => None,
+        }
+    }
+}
+
+/// Text font. Only System UI (Segoe UI) ships with Windows; the others are used when they are
+/// installed, and AntiCraft never bundles them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum UiFont {
+    #[default]
+    System,
+    Inter,
+    GoogleSans,
+}
+
+/// Interface text size: 12, 14 (default) or 16 px body text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum FontSize {
+    Small,
+    #[default]
+    Medium,
+    Large,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -386,6 +442,8 @@ pub struct Settings {
     pub version: u32,
     pub model: String,
     pub theme: Theme,
+    /// Conversation width and text font/size (Settings > Appearance).
+    pub appearance: Appearance,
     /// Most recent first, deduplicated.
     pub workspace_history: Vec<PathBuf>,
     /// Read/search tools run without confirmation.
@@ -466,6 +524,7 @@ impl Default for Settings {
             version: SETTINGS_VERSION,
             model: DEFAULT_MODEL.into(),
             theme: Theme::Dark,
+            appearance: Appearance::default(),
             workspace_history: Vec::new(),
             auto_approve_read_tools: true,
             shell_timeout_secs: 120,

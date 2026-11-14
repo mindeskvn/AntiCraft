@@ -1,6 +1,8 @@
-//! Customizations page (DESIGN.md 2.8), modeled on `_ref/ui/06-customizations.png`:
-//! title row with a settings search box, a left-packed tab strip, then sections of flat rows
-//! (colored icon, label + description, control on the right).
+//! Settings (DESIGN.md 2.8): an overlay over the current screen, as the 2.31 reference shows it.
+//!
+//! A modal card with a title row (settings search and a close button), a rail of sections down
+//! its left edge and the section's flat rows on the right (colored icon, label + description,
+//! control on the right). The screen underneath keeps its state and is painted behind the card.
 //! Edits mark `settings_dirty`; `AntiCraftApp::ui` flushes them through `SaveSettings`.
 
 use egui::{Align2, Color32, Rect, Sense, Stroke, StrokeKind, Ui, Vec2};
@@ -13,23 +15,89 @@ use crate::auth::external::{AccountProvider, AccountStatus, AccountView};
 use crate::auth::{AuthStatus, ClientSource, CLIENT_SECRET_ENV};
 use crate::agent::policy::{validate_rule, MAX_RULES};
 use crate::agent::plugins::PluginChoice;
-use crate::settings::{AgentMode, ArtifactReviewPolicy, QueueMode, Settings, TerminalPolicy, Theme, MAX_PROVIDER_PROFILES};
+use crate::settings::{AgentMode, ArtifactReviewPolicy, ConversationWidth, FontSize, QueueMode, Settings, TerminalPolicy, Theme, UiFont, MAX_PROVIDER_PROFILES};
 use crate::providers::{ProviderKind, ProviderProfile};
 
-/// Column width measured on the reference (x 438..1196).
+/// Widest the section's rows get inside the card.
 const COLUMN: f32 = 758.0;
 /// Row pitch on the reference is ~73px: 6 + 40 + 12 margin plus 15 spacing.
 const ROW_GAP: f32 = 15.0;
+/// Width of the section rail on the card's left edge.
+const RAIL_W: f32 = 200.0;
+/// The card's preferred size; a smaller window shrinks it.
+const CARD_W: f32 = 1040.0;
+const CARD_H: f32 = 720.0;
+/// Room the card leaves at the window's edges.
+const CARD_MARGIN: f32 = 40.0;
+/// Height of the card's title row.
+const HEADER_H: f32 = 52.0;
+/// Width of the settings search field.
+const SEARCH_W: f32 = 200.0;
+/// Rows of the section rail, in order.
+const SECTIONS: [(CustomizeTab, &str, &str); 5] = [
+    (CustomizeTab::General, icons::BRAIN, "Models"),
+    (CustomizeTab::Agent, icons::WRENCH, "Tools and approvals"),
+    (CustomizeTab::Workspaces, icons::FOLDER, "Workspaces"),
+    (CustomizeTab::Providers, icons::DESKTOP, "Providers"),
+    (CustomizeTab::Account, icons::USER_CIRCLE, "Account"),
+];
 
-pub fn show(ui: &mut Ui, state: &mut UiState, commands: &mut Vec<UiAction>) {
-    egui::ScrollArea::vertical().id_salt("customize_page").auto_shrink([false, false]).show(ui, |ui| {
+/// Size of the card in a window whose content area is `avail`.
+fn card_size(avail: Vec2) -> Vec2 {
+    Vec2::new(CARD_W.min(avail.x - 2.0 * CARD_MARGIN).max(560.0), CARD_H.min(avail.y - 2.0 * CARD_MARGIN).max(360.0))
+}
+
+/// The Settings overlay over the current screen, while `state.customize_open`. It closes with
+/// its close button or Esc, never with a click outside: that would throw away a typed key.
+pub fn overlay(ctx: &egui::Context, state: &mut UiState, commands: &mut Vec<UiAction>) {
+    if !state.customize_open {
+        return;
+    }
+    // The provider dialog is a modal of its own, shown after this one: Esc is its first.
+    let dialog_open = state.provider_dialog.is_some();
+    let size = card_size(ctx.content_rect().size());
+    let mut close = false;
+    let frame = widgets::card(theme::RADIUS_POPUP + 2, 0).stroke(Stroke::new(1.0, theme::POPUP_BORDER)).shadow(ctx.global_style().visuals.popup_shadow);
+    let modal = egui::Modal::new(egui::Id::unique("anticraft_settings")).frame(frame).backdrop_color(Color32::from_black_alpha(140)).show(ctx, |ui| {
+        let (card, _) = ui.allocate_exact_size(size, Sense::hover());
+        let header = Rect::from_min_size(card.min, Vec2::new(card.width(), HEADER_H));
+        close |= title_row(ui, header);
+        let rail = Rect::from_min_max(egui::pos2(card.left(), header.bottom()), egui::pos2(card.left() + RAIL_W, card.bottom()));
+        let content = Rect::from_min_max(egui::pos2(rail.right() + 1.0, header.bottom() + 1.0), card.max);
+        ui.painter().vline(rail.right(), rail.y_range(), Stroke::new(1.0, theme::EDGE));
+        ui.scope_builder(egui::UiBuilder::new().max_rect(rail.shrink2(Vec2::new(10.0, 12.0))), |ui| section_rail(ui, state));
+        ui.scope_builder(egui::UiBuilder::new().max_rect(content), |ui| {
+            ui.set_clip_rect(content.intersect(ui.clip_rect()));
+            sections(ui, state, commands);
+        });
+    });
+    let esc = || ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+    if close || (!dialog_open && modal.is_top_modal && !modal.any_popup_open && esc()) {
+        state.close_customize();
+    }
+}
+
+/// The title row: "Settings", the search field and the close button. True when closed.
+fn title_row(ui: &mut Ui, row: Rect) -> bool {
+    ui.painter().text(egui::pos2(row.left() + 22.0, row.center().y), Align2::LEFT_CENTER, "Settings", theme::medium(15.5), theme::FG);
+    ui.painter().hline(row.x_range(), row.bottom(), Stroke::new(1.0, theme::EDGE));
+    let close = Rect::from_center_size(egui::pos2(row.right() - 26.0, row.center().y), Vec2::splat(26.0));
+    let r = ui.interact(close, ui.scope_id().with("settings_close"), Sense::click());
+    widgets::paint_icon_button(ui, close, &r, icons::X, true, theme::FG_MUTED);
+    let field = Rect::from_min_size(egui::pos2(close.left() - 10.0 - SEARCH_W, row.center().y - 14.0), Vec2::new(SEARCH_W, 28.0));
+    search_field(ui, field);
+    r.on_hover_text("Close (Esc)").clicked()
+}
+
+/// The current section's rows, filtered by the search field, without the card around them.
+/// (The overlay clips them to its own rect; tests that read a row far down the page draw them
+/// straight into a tall canvas.)
+pub(crate) fn sections(ui: &mut Ui, state: &mut UiState, commands: &mut Vec<UiAction>) {
+    let query: String = ui.data(|d| d.get_temp(search_id())).unwrap_or_default();
+    egui::ScrollArea::vertical().id_salt(("customize_page", state.customize_tab as u8)).auto_shrink([false, false]).show(ui, |ui| {
         ui.add_space(22.0);
-        widgets::centered_column(ui, COLUMN, |ui| {
+        widgets::centered_column(ui, COLUMN.min(ui.available_width() - 48.0), |ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
-            let query = header(ui);
-            ui.add_space(19.0);
-            tabs(ui, state);
-            ui.add_space(34.0);
             let mut cx = Ctx { query: query.trim().to_lowercase(), shown: 0 };
             match state.customize_tab {
                 CustomizeTab::General => models(ui, state, commands, &mut cx),
@@ -49,6 +117,25 @@ pub fn show(ui: &mut Ui, state: &mut UiState, commands: &mut Vec<UiAction>) {
     });
 }
 
+/// The section rail: one row per section, the open one filled, and the version at the foot.
+fn section_rail(ui: &mut Ui, state: &mut UiState) {
+    ui.spacing_mut().item_spacing.y = 2.0;
+    for (tab, icon, label) in SECTIONS {
+        let selected = state.customize_tab == tab;
+        if widgets::nav_row(ui, icon, label, selected, true).clicked() && !selected {
+            state.open_customize(tab);
+        }
+    }
+    let foot = ui.max_rect();
+    ui.painter().text(
+        egui::pos2(foot.left() + 10.0, foot.bottom() - 6.0),
+        Align2::LEFT_BOTTOM,
+        format!("AntiCraft {}", env!("CARGO_PKG_VERSION")),
+        theme::font(11.5),
+        theme::FG_DIM,
+    );
+}
+
 /// Per-frame row filter state.
 struct Ctx {
     query: String,
@@ -61,15 +148,15 @@ impl Ctx {
     }
 }
 
-/// Title on the left, settings search field on the right. Returns the query (kept in egui
-/// memory, UI-only).
-fn header(ui: &mut Ui) -> String {
-    let id = ui.make_persistent_id("customize_search");
+/// egui memory key of the settings search field (UI-only).
+fn search_id() -> egui::Id {
+    egui::Id::unique("anticraft_settings_search")
+}
+
+/// The settings search field. What it holds filters the section's rows.
+fn search_field(ui: &mut Ui, field: Rect) {
+    let id = search_id();
     let mut q: String = ui.data(|d| d.get_temp(id)).unwrap_or_default();
-    let w = ui.available_width();
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(w, 28.0), Sense::hover());
-    ui.painter().text(egui::pos2(rect.left() + 10.0, rect.center().y), Align2::LEFT_CENTER, "Customizations", theme::medium(16.0), theme::FG);
-    let field = Rect::from_min_max(egui::pos2(rect.right() - 160.0, rect.top()), rect.max);
     let focused = ui.ctx().memory(|m| m.has_focus(id.with("edit")));
     let p = ui.painter();
     p.rect_filled(field, 6, theme::FIELD_BG);
@@ -86,58 +173,9 @@ fn header(ui: &mut Ui) -> String {
             .hint_text(egui::RichText::new("Search settings").color(theme::PLACEHOLDER))
             .desired_width(edit.width()),
     );
-    ui.data_mut(|d| d.insert_temp(id, q.clone()));
-    q
+    ui.data_mut(|d| d.insert_temp(id, q));
 }
 
-/// Tab strip: a 29px rounded track with the tabs packed from the left at their intrinsic
-/// width. The active tab is shown only by brighter text, as in the reference.
-fn tabs(ui: &mut Ui, state: &mut UiState) {
-    let tabs = [
-        (CustomizeTab::General, icons::BRAIN, "Models"),
-        (CustomizeTab::Agent, icons::WRENCH, "Tools and approvals"),
-        (CustomizeTab::Workspaces, icons::FOLDER, "Workspaces"),
-        (CustomizeTab::Providers, icons::DESKTOP, "Providers"),
-        (CustomizeTab::Account, icons::USER_CIRCLE, "Account"),
-    ];
-    let w = ui.available_width();
-    let (track, _) = ui.allocate_exact_size(Vec2::new(w, 30.0), Sense::hover());
-    ui.painter().rect_filled(track, 6, theme::FIELD_BG);
-    ui.painter().rect_stroke(track, 6, Stroke::new(1.0, theme::TRACK_BORDER), StrokeKind::Inside);
-    let inner = track.shrink(3.0);
-    let mut x = track.left() + 10.0 - 6.0;
-    for (i, (tab, icon, label)) in tabs.into_iter().enumerate() {
-        let active = state.customize_tab == tab;
-        let g = ui.painter().layout_no_wrap(label.to_owned(), theme::font(12.0), theme::FG);
-        // icon 14 + 6 gap + label, plus 6px padding on each side.
-        let tw = 14.0 + 6.0 + g.size().x + 12.0;
-        let rect = Rect::from_min_size(egui::pos2(x, inner.top()), Vec2::new(tw, inner.height()));
-        x += tw + 4.0;
-        let r = ui.interact(rect, ui.scope_id().with(("ctab", i)), Sense::click());
-        let t = ui.ctx().animate_bool_with_time(r.id, r.hovered() && !active, 0.12);
-        let p = ui.painter();
-        if t > 0.0 {
-            p.rect_filled(rect, 6, TAB_HOVER.gamma_multiply(t));
-        }
-        let c = if active { TAB_ACTIVE } else { TAB_INACTIVE.lerp_to_gamma(TAB_ACTIVE, t) };
-        p.text(egui::pos2(rect.left() + 6.0, rect.center().y), Align2::LEFT_CENTER, icon, theme::icon(14.0), c);
-        p.galley_with_override_text_color(egui::pos2(rect.left() + 26.0, rect.center().y - g.size().y / 2.0), g, c);
-        if r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-            if state.customize_tab != tab {
-                // The provider dialog belongs to the section it was opened from; another tab
-                // must not draw it (the Providers tab draws its own when it is open there).
-                state.bypass_dialog = false;
-            }
-            state.customize_tab = tab;
-        }
-    }
-}
-
-/// Subtle hover fill for tabs.
-const TAB_HOVER: Color32 = Color32::from_rgb(0x22, 0x22, 0x22);
-/// Tab label colors (the reference strip is low-contrast).
-const TAB_ACTIVE: Color32 = Color32::from_rgb(0x8a, 0x8a, 0x8a);
-const TAB_INACTIVE: Color32 = Color32::from_rgb(0x5a, 0x5a, 0x5a);
 /// Distance from the label column to a left-placed toggle (reference toggle x 834 for text x 528; includes item spacing).
 const TOGGLE_COLUMN: f32 = 297.0;
 /// Border of numeric / choice fields.
@@ -337,9 +375,27 @@ fn models(ui: &mut Ui, state: &mut UiState, commands: &mut Vec<UiAction>, cx: &m
     dirty |= toggle_row(ui, cx, icons::LIGHTNING, theme::ACCENT_AMBER, "Preview model access", "Turn on if your account can use preview models. AntiCraft does not detect this.", &mut state.settings.preview_access);
     dirty |= toggle_row(ui, cx, icons::LIGHTNING, theme::ACCENT_BLUE, "Latest Flash GA", "Send Flash requests as the newest generally available Flash model.", &mut state.settings.latest_flash_ga);
     ui.add_space(22.0);
-    section(ui, "Appearance", "Only the dark theme is fully styled.");
+    section(ui, "Appearance", "Changes apply at once. Only the dark theme is fully styled.");
     row(ui, cx, icons::DESKTOP, theme::FG_SECONDARY, "Theme", "Applies to the whole window.", |ui| {
         dirty |= widgets::segmented(ui, &mut state.settings.theme, &[(Theme::Light, "Light"), (Theme::Dark, "Dark")]);
+    });
+    let a = &mut state.settings.appearance;
+    row(ui, cx, icons::ARROWS_LEFT_RIGHT, theme::ACCENT_BLUE, "Conversation width", "Default is 768 px, Wide 960 px. Fill stretches conversations across the whole center pane. The agent works in both.", |ui| {
+        dirty |= widgets::segmented(ui, &mut a.width, &[(ConversationWidth::Default, "Default"), (ConversationWidth::Wide, "Wide"), (ConversationWidth::Fill, "Fill")]);
+    });
+    let fonts = [(UiFont::System, "System UI"), (UiFont::Inter, "Inter"), (UiFont::GoogleSans, "Google Sans")];
+    let missing: Vec<&str> = fonts.iter().filter(|(f, _)| !theme::font_available(*f)).map(|(_, l)| *l).collect();
+    let font_desc = if missing.is_empty() {
+        "The font of the interface text. Code keeps its monospaced font.".to_owned()
+    } else {
+        format!("The font of the interface text. {} {} not installed on this computer; AntiCraft uses fonts installed in Windows and does not bundle them.", missing.join(" and "), if missing.len() == 1 { "is" } else { "are" })
+    };
+    row(ui, cx, icons::TEXT_T, theme::ACCENT_AMBER, "Font", &font_desc, |ui| {
+        let options: Vec<(UiFont, &str, bool)> = fonts.iter().map(|(f, l)| (*f, *l, theme::font_available(*f))).collect();
+        dirty |= widgets::segmented_some(ui, &mut a.font, &options, "Not installed on this computer");
+    });
+    row(ui, cx, icons::TEXT_T, theme::FG_SECONDARY, "Font size", "Interface text size in pixels. Icons keep their size.", |ui| {
+        dirty |= widgets::segmented(ui, &mut a.font_size, &[(FontSize::Small, "12"), (FontSize::Medium, "14"), (FontSize::Large, "16")]);
     });
     state.settings_dirty |= dirty;
 }
@@ -472,7 +528,7 @@ fn bypass_mode(ui: &mut Ui, state: &mut UiState, commands: &mut Vec<UiAction>, c
     let label = selected
         .as_deref()
         .and_then(|id| state.settings.providers.iter().find(|p| p.id == id))
-        .map(|p| profile_label(p))
+        .map(profile_label)
         .unwrap_or_else(|| "Choose a provider".to_owned());
     let mut pick = None;
     let mut add = false;
@@ -1427,8 +1483,7 @@ fn profile_desc(profile: &ProviderProfile) -> String {
 /// shown and its models start loading.
 pub fn edit_provider(state: &mut UiState, commands: &mut Vec<UiAction>, id: &str) {
     let Some(profile) = state.settings.providers.iter().find(|p| p.id == id).cloned() else { return };
-    state.navigate(super::View::Customizations);
-    state.customize_tab = CustomizeTab::Providers;
+    state.open_customize(CustomizeTab::Providers);
     let mut d = ProviderDialog::edit(&profile);
     start_load(&mut state.provider_models_seq, commands, &mut d, profile);
     state.provider_dialog = Some(d);
@@ -2057,11 +2112,12 @@ mod tests {
         test_util::click(pos, pressed)
     }
 
-    /// One frame of the page: the painted texts and the commands it sent.
+    /// One frame of the sections, on the full canvas: the painted texts and the commands it
+    /// sent. Tests read the rows without the overlay's scroll area narrowing them.
     fn draw(ctx: &egui::Context, state: &mut UiState, events: Vec<egui::Event>) -> (Vec<(String, Rect)>, Vec<UiAction>) {
         let mut commands = Vec::new();
         let texts = test_util::painted(ctx, events, |ui| {
-            egui::CentralPanel::default().show(ui, |ui| show(ui, state, &mut commands));
+            egui::CentralPanel::default().show(ui, |ui| super::sections(ui, state, &mut commands));
         });
         (texts, commands)
     }
@@ -2071,6 +2127,26 @@ mod tests {
         let (texts, commands) = draw(ctx, state, events);
         assert!(commands.is_empty(), "nothing is sent: {commands:?}");
         texts
+    }
+
+    /// One frame of the whole Settings overlay (title row, rail and sections). A modal area
+    /// settles over two frames, so this plays `events` and then an empty frame, and returns
+    /// the texts of the second.
+    fn shell(ctx: &egui::Context, state: &mut UiState, events: Vec<egui::Event>) -> Vec<(String, Rect)> {
+        state.customize_open = true;
+        let mut commands = Vec::new();
+        test_util::painted(ctx, events, |_ui| overlay(ctx, state, &mut commands));
+        let texts = test_util::painted(ctx, Vec::new(), |_ui| overlay(ctx, state, &mut commands));
+        assert!(commands.is_empty(), "nothing is sent: {commands:?}");
+        texts
+    }
+
+    /// Click `text` in the overlay (the search field sits in its title row).
+    fn shell_click_text(ctx: &egui::Context, state: &mut UiState, text: &str) {
+        let texts = shell(ctx, state, Vec::new());
+        let pos = texts.iter().find(|(t, _)| t == text).map(|(_, r)| r.center()).unwrap_or_else(|| panic!("no {text:?} in the overlay: {texts:?}"));
+        shell(ctx, state, vec![egui::Event::PointerMoved(pos), click(pos, true)]);
+        shell(ctx, state, vec![click(pos, false)]);
     }
 
     /// Rects of the painted texts equal to `text`, top to bottom.
@@ -2417,8 +2493,11 @@ mod tests {
     fn the_search_finds_rows_by_their_model_and_url() {
         let ctx = context();
         let mut state = providers_state();
-        click_text(&ctx, &mut state, "Search settings");
-        type_text(&ctx, &mut state, "localhost");
+        // The field is in the overlay's title row; the sections read what it holds.
+        shell_click_text(&ctx, &mut state, "Search settings");
+        for c in "localhost".chars() {
+            shell(&ctx, &mut state, vec![egui::Event::Text(c.to_string())]);
+        }
         let texts = page(&ctx, &mut state, Vec::new());
         assert!(shows(&texts, "Profile c") && !shows(&texts, "Profile a") && !shows(&texts, "Profile b"));
         assert!(!texts.iter().any(|(t, _)| t.ends_with("Add provider")));
@@ -2504,7 +2583,7 @@ mod tests {
     fn tall_page(ctx: &egui::Context, state: &mut UiState, events: Vec<egui::Event>) -> Vec<(String, Rect)> {
         let mut commands = Vec::new();
         let texts = crate::ui::test_util::painted_in(ctx, TALL, events, |ui| {
-            egui::CentralPanel::default().show(ui, |ui| show(ui, state, &mut commands));
+            egui::CentralPanel::default().show(ui, |ui| super::sections(ui, state, &mut commands));
         });
         assert!(commands.is_empty(), "nothing is sent: {commands:?}");
         texts
@@ -2515,7 +2594,7 @@ mod tests {
         let mut commands = Vec::new();
         let mut frame = |events| {
             crate::ui::test_util::painted_in(ctx, TALL, events, |ui| {
-                egui::CentralPanel::default().show(ui, |ui| show(ui, state, &mut commands));
+                egui::CentralPanel::default().show(ui, |ui| super::sections(ui, state, &mut commands));
             })
         };
         frame(vec![egui::Event::PointerMoved(pos), click(pos, true)]);
@@ -2666,14 +2745,14 @@ mod tests {
         let mut state = bypass_state();
         let mut commands = Vec::new();
         let texts = crate::ui::test_util::painted_in(&ctx, TALL, Vec::new(), |ui| {
-            egui::CentralPanel::default().show(ui, |ui| show(ui, &mut state, &mut commands));
+            egui::CentralPanel::default().show(ui, |ui| super::sections(ui, &mut state, &mut commands));
         });
         let pos = texts.iter().find(|(t, _)| t.ends_with("Add .md file…")).map(|(_, r)| r.center()).expect("the button");
         let mut sent = Vec::new();
         for events in [vec![egui::Event::PointerMoved(pos), click(pos, true)], vec![click(pos, false)]] {
             commands.clear();
             crate::ui::test_util::painted_in(&ctx, TALL, events, |ui| {
-                egui::CentralPanel::default().show(ui, |ui| show(ui, &mut state, &mut commands));
+                egui::CentralPanel::default().show(ui, |ui| super::sections(ui, &mut state, &mut commands));
             });
             sent.append(&mut commands);
         }
@@ -2721,11 +2800,11 @@ mod account_tests {
     use crate::auth::antigravity::{ImportSummary, Issuer, SessionInfo};
     use crate::ui::test_util::{click, context, painted};
 
-    /// One frame of the page: the painted texts and the commands it sent.
+    /// One frame of the sections (no overlay): the painted texts and the commands it sent.
     fn draw(ctx: &egui::Context, state: &mut UiState, events: Vec<egui::Event>) -> (Vec<(String, Rect)>, Vec<UiAction>) {
         let mut commands = Vec::new();
         let texts = painted(ctx, events, |ui| {
-            egui::CentralPanel::default().show(ui, |ui| show(ui, state, &mut commands));
+            egui::CentralPanel::default().show(ui, |ui| super::sections(ui, state, &mut commands));
         });
         (texts, commands)
     }

@@ -31,11 +31,11 @@ pub fn band(ui: &mut Ui, state: &mut UiState) -> bool {
         // plainly, so nobody believes their prompts are going anywhere else.
         None if state.settings.bypass.provider.is_none() => {
             "Bypass Mode is on but no provider is chosen, so every message still goes to the normal model. \
-             Choose a provider in Customizations > Tools and approvals > Bypass Mode."
+             Choose a provider in Settings > Tools and approvals > Bypass Mode."
                 .to_owned()
         }
         None => "Bypass Mode is on but its provider no longer exists, so every message still goes to the normal model. \
-                 Choose a provider in Customizations > Tools and approvals > Bypass Mode."
+                 Choose a provider in Settings > Tools and approvals > Bypass Mode."
             .to_owned(),
     };
     let mut turn_off = false;

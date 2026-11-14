@@ -9,7 +9,7 @@
 //! never depends on which field a screen happens to read.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -60,6 +60,8 @@ pub enum AppCommand {
     DeleteConversation(Uuid),
     /// Open the native folder picker (async, off the UI thread).
     PickWorkspace,
+    /// "Open IDE": open this project folder in VS Code, or in Explorer without VS Code.
+    OpenInIde(PathBuf),
     SetWorkspace(PathBuf),
     SetModel(String),
     /// The UI's settings edits. `base` is the copy they were made from: only the fields that
@@ -119,6 +121,8 @@ pub enum AppCommand {
     SendPromptWithMode(String, crate::agent::policy::AgentMode),
     /// Set the conversation mode chip.
     SetAgentMode(crate::agent::policy::AgentMode),
+    /// Permission preset (terminal auto-run) for the open conversation only.
+    SetPermissionPreset(crate::agent::policy::TerminalPolicy),
     /// Truncate history before the last user message and send `text` instead. The mode is the
     /// one-shot `/plan` or `/fast` the edited prompt was sent with, so editing does not lose it.
     EditLastPrompt(String, Option<crate::agent::policy::AgentMode>),
@@ -146,7 +150,7 @@ pub enum AppCommand {
     /// Internal: async MCP connection round finished. Carries the reload it belongs to, the new
     /// hub and the server statuses.
     McpConnected(u64, Option<Arc<McpHub>>, Vec<(String, bool, usize)>),
-    // --- Subscription accounts (Customizations > Account > Accounts).
+    // --- Subscription accounts (Settings > Account > Accounts).
     /// Start a subscription sign-in. Refused while a turn runs or another sign-in (Google or
     /// account) is in flight.
     SignInAccount(AccountProvider),
@@ -284,7 +288,7 @@ impl From<&Plugin> for PluginInfo {
     }
 }
 
-/// A change of the imported session (Customizations > Account). Holds no token.
+/// A change of the imported session (Settings > Account). Holds no token.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ImportedSessionEvent {
     /// In use for Code Assist. Sent when it starts and whenever its token is replaced.
@@ -462,6 +466,14 @@ pub struct Backend {
     mcp: Option<Arc<McpHub>>,
     /// Modes chosen per conversation this session (the composer chip is per conversation).
     modes: HashMap<Uuid, AgentMode>,
+    /// Permission preset per conversation, chosen in the message box; one without follows
+    /// `settings.terminal_policy`.
+    presets: HashMap<Uuid, crate::agent::policy::TerminalPolicy>,
+    /// The open conversation's preset, if it chose one.
+    conv_preset: Option<crate::agent::policy::TerminalPolicy>,
+    /// Mode and preset picked in the message box while no conversation exists (the first Home
+    /// after start, or after the open one was deleted): the next conversation takes them.
+    pending_choice: (Option<AgentMode>, Option<crate::agent::policy::TerminalPolicy>),
     /// Messages queued while a turn runs: (id, text). Belongs to the open conversation.
     queue: VecDeque<(u64, String)>,
     queue_seq: u64,
@@ -806,6 +818,9 @@ impl Backend {
             plugins: Vec::new(),
             mcp: None,
             modes: HashMap::new(),
+            presets: HashMap::new(),
+            conv_preset: None,
+            pending_choice: (None, None),
             queue: VecDeque::new(),
             queue_seq: 0,
             store: ConversationStore::new(&opts.data_dir),
@@ -1173,7 +1188,11 @@ impl Backend {
     /// Rebuild the shared policy from settings and the conversation mode. A running turn
     /// sees the change at its next request or tool call.
     fn sync_policy(&self) {
-        *self.policy.write().unwrap_or_else(|e| e.into_inner()) = self.settings.approval_policy(self.conv_mode);
+        let mut policy = self.settings.approval_policy(self.conv_mode);
+        if let Some(t) = self.conv_preset {
+            policy.terminal = t;
+        }
+        *self.policy.write().unwrap_or_else(|e| e.into_inner()) = policy;
     }
 
     /// Workspace of the open conversation, else the current one.
@@ -1288,6 +1307,7 @@ impl Backend {
             AppCommand::ImportedSessionChanged(generation, change) => self.imported_session_changed(generation, change).await,
             AppCommand::NewChat => {
                 let conv = Conversation::new(self.settings.current_workspace().map(Into::into), self.settings.model.clone());
+                self.adopt_pending_choice(conv.id);
                 self.open(conv);
             }
             AppCommand::OpenConversation(id) => match self.store.load(id) {
@@ -1319,6 +1339,14 @@ impl Backend {
                     self.emit_queue();
                 }
                 self.refresh_list();
+            }
+            AppCommand::OpenInIde(folder) => {
+                let events = self.events.clone();
+                tokio::task::spawn_blocking(move || {
+                    if let Err(e) = open_in_ide(&folder) {
+                        let _ = events.send(AppEvent::Error(format!("Could not open {}: {e}", folder.display())));
+                    }
+                });
             }
             AppCommand::PickWorkspace => {
                 let tx = self.self_tx.clone();
@@ -1510,11 +1538,26 @@ impl Backend {
                 }
             }
             AppCommand::SetAgentMode(m) => {
-                if let Some(id) = self.current.as_ref().map(|c| c.id) {
-                    self.modes.insert(id, m);
+                match self.current.as_ref().map(|c| c.id) {
+                    Some(id) => {
+                        self.modes.insert(id, m);
+                    }
+                    None => self.pending_choice.0 = Some(m),
                 }
                 if self.conv_mode != m {
                     self.conv_mode = m;
+                    self.sync_policy();
+                }
+            }
+            AppCommand::SetPermissionPreset(p) => {
+                match self.current.as_ref().map(|c| c.id) {
+                    Some(id) => {
+                        self.presets.insert(id, p);
+                    }
+                    None => self.pending_choice.1 = Some(p),
+                }
+                if self.conv_preset != Some(p) {
+                    self.conv_preset = Some(p);
                     self.sync_policy();
                 }
             }
@@ -1546,6 +1589,8 @@ impl Backend {
                     Some(cp) => {
                         if let Some(conv) = self.current.as_mut() {
                             conv.messages = cp.messages;
+                            // The prompts from this one on are gone, and so are their times.
+                            conv.prompt_times.retain(|&k, _| k < user_index);
                         }
                         // Snapshot for ConversationLoaded event; save first with a separate borrow.
                         if let Some(conv) = &mut self.current {
@@ -1771,6 +1816,7 @@ impl Backend {
         self.drop_agent();
         // An opened conversation gets its chosen mode (else the default) and an empty queue.
         self.conv_mode = self.modes.get(&conv.id).copied().unwrap_or(self.settings.agent_mode);
+        self.conv_preset = self.presets.get(&conv.id).copied();
         self.sync_policy();
         if !self.queue.is_empty() {
             self.queue.clear();
@@ -1829,11 +1875,11 @@ impl Backend {
             // its file. Said as itself — "not logged in" would send the user to the Google
             // sign-in, which cannot fix it.
             let Some(auth) = self.accounts.auth(&entry.id) else {
-                return Err(format!("The {label} account needs signing in again (Customizations > Account)."));
+                return Err(format!("The {label} account needs signing in again (Settings > Account)."));
             };
             let model = entry.model.trim().to_owned();
             if model.is_empty() {
-                return Err(format!("The {label} account has no model chosen. Open Customizations > Account and pick one."));
+                return Err(format!("The {label} account has no model chosen. Open Settings > Account and pick one."));
             }
             let profile = self.account_turn_profile(entry, auth.view().plan.as_deref());
             // The account's own window: without one, compaction keeps to Gemini's million tokens
@@ -1855,7 +1901,7 @@ impl Backend {
             // Saved before a model was chosen: said with the way out, before any request.
             if model.is_empty() {
                 return Err(format!(
-                    "{} has no model chosen. Pick one from the model menu in the composer, after loading its models (Customizations > Providers > Edit).",
+                    "{} has no model chosen. Pick one from the model menu in the composer, after loading its models (Settings > Providers > Edit).",
                     profile.label.trim()
                 ));
             }
@@ -1885,7 +1931,7 @@ impl Backend {
         let model = profile.model.trim().to_owned();
         if model.is_empty() {
             return Err(format!(
-                "Bypass Mode uses {}, which has no model chosen. Load its models and pick one in Customizations > Providers > Edit.",
+                "Bypass Mode uses {}, which has no model chosen. Load its models and pick one in Settings > Providers > Edit.",
                 profile.label.trim()
             ));
         }
@@ -1991,9 +2037,22 @@ impl Backend {
                 return;
             }
             let conv = Conversation::new(self.settings.current_workspace().map(Into::into), self.settings.model.clone());
+            self.adopt_pending_choice(conv.id);
             self.open(conv);
         }
         self.start_turn(kind);
+    }
+
+    /// Give the conversation `id` the mode and preset picked before any conversation existed,
+    /// so the turn runs with what the message box shows.
+    fn adopt_pending_choice(&mut self, id: Uuid) {
+        let (mode, preset) = std::mem::take(&mut self.pending_choice);
+        if let Some(m) = mode {
+            self.modes.insert(id, m);
+        }
+        if let Some(p) = preset {
+            self.presets.insert(id, p);
+        }
     }
 
     /// Start a turn task for the open conversation (no turn may be running).
@@ -2011,6 +2070,7 @@ impl Backend {
         // finds this snapshot. Checkpoints are best-effort; a failure is logged and never
         // surfaces to the user.
         let user_index = crate::ui::user_bubble_count(&conv.messages);
+        conv.prompt_times.insert(user_index, chrono::Utc::now());
         if !conv.messages.is_empty() {
             let store = self.store.clone();
             let conv_id = conv.id;
@@ -2106,7 +2166,7 @@ impl Backend {
     }
 }
 
-/// Sessions reused from another Google tool's credential file (Customizations > Account).
+/// Sessions reused from another Google tool's credential file (Settings > Account).
 ///
 /// Such a session is used only after the user chose it, never while AntiCraft's own sign-in is
 /// in use, and its tokens stay in memory: nothing is written to AntiCraft's credential store or
@@ -2227,7 +2287,7 @@ impl Backend {
             }
             Watch::Ended(mut reason) => {
                 if self.auth.is_none() {
-                    reason.push_str(" Google sign-in first needs the OAuth client secret: see Customizations > Account.");
+                    reason.push_str(" Google sign-in first needs the OAuth client secret: see Settings > Account.");
                 }
                 self.stop_imported_session();
                 self.reset_account_state().await;
@@ -2241,7 +2301,7 @@ impl Backend {
     }
 }
 
-/// Subscription accounts (Customizations > Account > Accounts).
+/// Subscription accounts (Settings > Account > Accounts).
 ///
 /// The registry owns the account files and their token sources; settings say which accounts are
 /// listed, in what order, which one sends turns and with which model. Every change to either goes
@@ -2709,6 +2769,69 @@ async fn expand_mentions(ws: Workspace, text: String) -> String {
     tokio::task::spawn_blocking(move || context::expand_mentions(&ws, &text)).await.unwrap_or(fallback)
 }
 
+/// VS Code's `Code.exe`: next to the `bin\code.cmd` found on `path` (the `PATH` value), else in
+/// the per-user or machine-wide install folder. `Code.exe` is started directly, never through
+/// `cmd.exe`, so the folder name is passed as one argument whatever it contains.
+fn find_vscode(path: Option<&std::ffi::OsStr>, local_app_data: Option<&Path>, program_files: Option<&Path>) -> Option<PathBuf> {
+    let on_path = path.into_iter().flat_map(std::env::split_paths).find_map(|dir| {
+        let cmd = dir.join("code.cmd");
+        let exe = dir.parent()?.join("Code.exe");
+        (cmd.is_file() && exe.is_file()).then_some(exe)
+    });
+    on_path.or_else(|| {
+        [local_app_data.map(|d| d.join("Programs")), program_files.map(Path::to_path_buf)]
+            .into_iter()
+            .flatten()
+            .map(|d| d.join("Microsoft VS Code").join("Code.exe"))
+            .find(|exe| exe.is_file())
+    })
+}
+
+/// Open `folder` in VS Code when it is installed, otherwise in Explorer. Returns which one.
+fn open_in_ide(folder: &Path) -> std::io::Result<&'static str> {
+    if !folder.is_dir() {
+        return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "the folder no longer exists"));
+    }
+    let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+    let programs = std::env::var_os("ProgramFiles").map(PathBuf::from);
+    if let Some(code) = find_vscode(std::env::var_os("PATH").as_deref(), local.as_deref(), programs.as_deref()) {
+        if std::process::Command::new(code).arg(folder).spawn().is_ok() {
+            return Ok("VS Code");
+        }
+    }
+    std::process::Command::new("explorer.exe").arg(folder).spawn().map(|_| "Explorer")
+}
+
+#[cfg(test)]
+mod open_in_ide_tests {
+    use super::*;
+
+    #[test]
+    fn vscode_is_found_next_to_its_cli_or_in_the_install_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let install = dir.path().join("Microsoft VS Code");
+        std::fs::create_dir_all(install.join("bin")).unwrap();
+        std::fs::write(install.join("bin").join("code.cmd"), "").unwrap();
+        std::fs::write(install.join("Code.exe"), "").unwrap();
+        let path = std::env::join_paths([dir.path().join("elsewhere"), install.join("bin")]).unwrap();
+        assert_eq!(find_vscode(Some(&path), None, None), Some(install.join("Code.exe")));
+        // Not on PATH: the per-user install folder (`%LOCALAPPDATA%\Programs`).
+        let local = tempfile::tempdir().unwrap();
+        let user_install = local.path().join("Programs").join("Microsoft VS Code");
+        std::fs::create_dir_all(&user_install).unwrap();
+        std::fs::write(user_install.join("Code.exe"), "").unwrap();
+        assert_eq!(find_vscode(None, Some(local.path()), None), Some(user_install.join("Code.exe")));
+        assert_eq!(find_vscode(None, None, None), None);
+    }
+
+    #[test]
+    fn a_missing_folder_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let gone = dir.path().join("gone");
+        assert_eq!(open_in_ide(&gone).unwrap_err().kind(), std::io::ErrorKind::NotFound);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2919,6 +3042,27 @@ mod tests {
         let evs = drain(&mut rx);
         assert!(evs.iter().any(|e| matches!(e, AppEvent::TurnRejected(_))));
         assert!(b.turn_cancel.is_none(), "no turn should be running");
+    }
+
+    /// The mode and preset picked on the first Home, before any conversation exists, are the
+    /// ones the conversation started by the first prompt runs with.
+    #[tokio::test]
+    async fn choices_made_before_any_conversation_go_to_the_first_one() {
+        use crate::agent::policy::TerminalPolicy;
+        let dir = tempfile::tempdir().unwrap();
+        let (mut b, _rx, _) = backend(dir.path());
+        assert!(b.current.is_none());
+        let other_mode = if b.settings.agent_mode == AgentMode::Fast { AgentMode::Planning } else { AgentMode::Fast };
+        let other_preset = if b.settings.terminal_policy == TerminalPolicy::Off { TerminalPolicy::Turbo } else { TerminalPolicy::Off };
+        b.handle(AppCommand::SetAgentMode(other_mode)).await;
+        b.handle(AppCommand::SetPermissionPreset(other_preset)).await;
+        b.handle(AppCommand::SendPrompt("hi".into())).await;
+        let id = b.current.as_ref().expect("the prompt started a conversation").id;
+        assert_eq!((b.conv_mode, b.conv_preset), (other_mode, Some(other_preset)));
+        assert_eq!((b.modes.get(&id), b.presets.get(&id)), (Some(&other_mode), Some(&other_preset)));
+        // Used up: a later conversation starts from the defaults again.
+        b.handle(AppCommand::NewChat).await;
+        assert_eq!((b.conv_mode, b.conv_preset), (b.settings.agent_mode, None));
     }
 
     #[tokio::test]
@@ -4083,7 +4227,7 @@ mod tests {
         assert_eq!(b.settings.active_account.as_deref(), Some(id.as_str()), "still the one in use: the next turn says why it cannot run");
         assert!(b.agent.is_none(), "the agent held the dead token source");
 
-        let message = "The Claude Code account needs signing in again (Customizations > Account).";
+        let message = "The Claude Code account needs signing in again (Settings > Account).";
         assert_eq!(b.build_agent(&Conversation::new(Some(ws.path().into()), "m")).err().as_deref(), Some(message));
         b.handle(AppCommand::SendPrompt("hi".into())).await;
         let evs = drain(&mut rx);
@@ -4352,7 +4496,7 @@ mod tests {
     }
 }
 
-/// Reusing a Google session another tool saved (Customizations > Account). Every file lives in a
+/// Reusing a Google session another tool saved (Settings > Account). Every file lives in a
 /// temp folder: tests never read the credential files of the machine they run on.
 #[cfg(test)]
 mod imported_session_tests {
@@ -4549,7 +4693,7 @@ mod imported_session_tests {
             })
             .expect("the end and its reason reach the UI");
         assert!(reason.starts_with("The Antigravity session for me@example.com expires at ") && reason.contains("Sign in with Google"), "{reason}");
-        assert!(reason.ends_with("Google sign-in first needs the OAuth client secret: see Customizations > Account."), "{reason}");
+        assert!(reason.ends_with("Google sign-in first needs the OAuth client secret: see Settings > Account."), "{reason}");
         let auth_at = evs.iter().position(|e| matches!(e, AppEvent::Auth(_))).expect("signed-in state");
         let ended_at = evs.iter().position(|e| matches!(e, AppEvent::ImportedSession(ImportedSessionEvent::Ended(_)))).unwrap();
         assert!(auth_at < ended_at, "the reason is the last banner");

@@ -2,7 +2,7 @@
 //!
 //! Both tools store an installed-app OAuth credential file at `~/.gemini/oauth_creds.json`.
 //! Reading it means the user does not have to sign in a second time just to try AntiCraft.
-//! The session is only used after an explicit choice (Customizations > Account).
+//! The session is only used after an explicit choice (Settings > Account).
 //!
 //! **This module is a read-only consumer.** It never writes to another application's files and
 //! never copies a token into AntiCraft's own credential store: the file is re-read each time a
@@ -20,7 +20,7 @@
 //! of failing with a 401 later.
 //!
 //! **We can renew with Antigravity's client now, though — just not from here.** AntiCraft can
-//! sign in to Antigravity directly (Customizations > Account > Accounts), using that same client
+//! sign in to Antigravity directly (Settings > Account > Accounts), using that same client
 //! with its own secret. A first-party Antigravity account refreshes itself forever, so the
 //! Account tab hides this import row while one is signed in: two Antigravity rows would be a
 //! permanent "which one sends?" question. The rule is simply: **a signed-in account wins over an

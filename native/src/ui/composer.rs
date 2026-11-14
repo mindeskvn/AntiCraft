@@ -1,7 +1,8 @@
-//! Composer card shared by Home and the docked conversation input (DESIGN.md 2.4,
+//! Composer card shared by Home and the docked conversation input (DESIGN.md 2.6,
 //! `_ref/ui/01-home.png`; ORCHESTRATION.md D): multiline input, `+` menu, model chip with the
 //! model picker (2.6), the Planning/Fast mode chip, `@` mention and `/` command popups,
-//! queued-message chips (Queue / Steer), edit-last-message, send / stop, and the "Local" tray.
+//! queued-message chips (Queue / Steer), edit-last-message, the model menu (which also picks
+//! the agent), the permission preset chip and send / stop.
 //!
 //! Composer-only state ([`ComposerState`]) lives in egui temp memory under one fixed id, so
 //! `UiState` and the screen signatures stay unchanged. Backend events for it are routed with
@@ -14,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use egui::text::{CCursor, CCursorRange};
-use egui::{Align2, Color32, CornerRadius, Event, Key, Rect, Sense, Stroke, Ui, Vec2};
+use egui::{Align2, Color32, Event, Key, Rect, Sense, Stroke, Ui, Vec2};
 use uuid::Uuid;
 
 use super::mentions::{self, IndexJob, MentionPopup, INDEX_STALE_AFTER};
@@ -22,16 +23,12 @@ use super::queue::{self, ChipAction, LocalQueue, QueueMode};
 use super::slash::{self, Builtin, SlashItem};
 use super::{format, icons, theme, widgets, ChatItem, UiAction, UiState};
 use crate::agent::context::Workflow;
-use crate::agent::policy::AgentMode;
+use crate::agent::policy::{AgentMode, TerminalPolicy};
 use crate::app::AppCommand;
 
-/// Card radius measured on the reference (the bottom tray follows it).
-const RADIUS: u8 = 12;
-/// Height of the bottom "Local" tray.
-const TRAY_H: f32 = 31.0;
-/// Tray fill (`#252525`, measured on the reference).
-const TRAY_FILL: Color32 = Color32::from_rgb(0x25, 0x25, 0x25);
-const PLACEHOLDER_TEXT: &str = "Ask anything, @ to mention, / for workflows";
+/// Card radius measured on the reference.
+const RADIUS: u8 = 16;
+const PLACEHOLDER_TEXT: &str = "Ask anything, @ to mention, / for actions";
 const PLACEHOLDER_BUSY: &str = "Type to queue a follow-up (Alt+Enter steers the running turn)";
 const PLACEHOLDER_REVIEW: &str = "Reply to the agent, or use the review buttons";
 /// Review placeholder while the artifacts panel (which then holds the buttons) is open.
@@ -96,8 +93,10 @@ pub struct ComposerState {
     slash_dismissed: bool,
     pub queue: LocalQueue,
     queue_conv: Option<Uuid>,
-    /// Mode chip per conversation (`None`: the unsaved new chat).
+    /// Agent (mode) per conversation (`None`: the unsaved new chat).
     modes: HashMap<Option<Uuid>, AgentMode>,
+    /// Permission preset per conversation; a conversation without one follows Settings.
+    presets: HashMap<Option<Uuid>, TerminalPolicy>,
     last_conv: Option<Uuid>,
     /// Original text of the last user message while it is being edited.
     pub editing: Option<String>,
@@ -113,6 +112,11 @@ pub struct ComposerState {
 
 fn state_id() -> egui::Id {
     egui::Id::unique("anticraft_composer_state")
+}
+
+/// Put the caret in the composer on its next frame (a Home suggestion filled it).
+pub fn request_focus(ctx: &egui::Context) {
+    with_state(ctx, |cs| cs.focus_request = true);
 }
 
 /// Lend the composer state to `f`, then put it back.
@@ -335,17 +339,23 @@ fn ended_normally(state: &UiState) -> bool {
 // ---------------------------------------------------------------------------------------------
 // Rendering
 
-/// Docked conversation composer (`_ref/ui/07-conversation.png`): one `#1c1c1c` box (1px
-/// `#252525`, radius 8, 12px margin) with the input and the controls row inside it.
+/// The message box frame: raised card color, a 1px border, rounded, with a soft shadow, the
+/// same on Home and in a conversation so the first prompt does not reshape it.
+fn card_frame() -> egui::Frame {
+    egui::Frame::new()
+        .fill(theme::CARD)
+        .stroke(Stroke::new(1.0, theme::CARD_BORDER))
+        .corner_radius(RADIUS)
+        .inner_margin(egui::Margin { left: 12, right: 10, top: 12, bottom: 8 })
+        .shadow(egui::epaint::Shadow { offset: [0, 4], blur: 16, spread: 0, color: Color32::from_black_alpha(120) })
+}
+
+/// Docked conversation composer: the input and the controls row in one box.
 ///
 /// The input starts at one line and grows with its text, as Home's does. A fixed tall input
 /// made the composer triple in height the moment the first prompt opened the conversation.
 pub fn show_docked(ui: &mut Ui, state: &mut UiState, commands: &mut Vec<UiAction>) {
-    egui::Frame::new()
-        .fill(theme::CARD)
-        .stroke(Stroke::new(1.0, theme::CARD_BORDER))
-        .corner_radius(8)
-        .inner_margin(12)
+    card_frame()
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.spacing_mut().item_spacing = Vec2::ZERO;
@@ -363,20 +373,13 @@ pub fn show_docked(ui: &mut Ui, state: &mut UiState, commands: &mut Vec<UiAction
 /// Tallest the input grows with its text before it scrolls.
 const INPUT_MAX_H: f32 = 200.0;
 
+/// Home's message box: the same box as [`show_docked`], pinned to the bottom of Home.
 pub fn show(ui: &mut Ui, state: &mut UiState, commands: &mut Vec<UiAction>, autofocus: bool) {
-    egui::Frame::new()
-        .fill(theme::CARD)
-        .stroke(Stroke::new(1.0, theme::CARD_BORDER))
-        .corner_radius(RADIUS)
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.spacing_mut().item_spacing = Vec2::ZERO;
-            egui::Frame::new().inner_margin(egui::Margin { left: 12, right: 8, top: 12, bottom: 4 }).show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                input_impl(ui, state, commands, autofocus, false);
-            });
-            tray(ui, state);
-        });
+    card_frame().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.spacing_mut().item_spacing = Vec2::ZERO;
+        input_impl(ui, state, commands, autofocus, false);
+    });
 }
 
 /// Which popup is open this frame.
@@ -484,8 +487,7 @@ fn maintain_workflows(ctx: &egui::Context, cs: &mut ComposerState, workspace: Op
     }
 }
 
-/// Input plus controls row. `docked` also puts the "Local" chip in the row (Home has it in the
-/// tray under the card).
+/// Input plus controls row. `docked`: the conversation's box (Home's takes the autofocus).
 fn input_impl(ui: &mut Ui, state: &mut UiState, commands: &mut Vec<UiAction>, autofocus: bool, docked: bool) {
     let ctx = ui.ctx().clone();
     with_state(&ctx, |cs| input_body(ui, cs, state, commands, autofocus, docked));
@@ -506,6 +508,10 @@ fn input_body(ui: &mut Ui, cs: &mut ComposerState, state: &mut UiState, commands
         if cs.last_conv.is_none() {
             if let Some(m) = cs.modes.remove(&None) {
                 cs.modes.insert(state.current, m);
+            }
+            // A preset picked on Home belongs to the conversation that prompt starts.
+            if let Some(p) = cs.presets.remove(&None) {
+                cs.presets.insert(state.current, p);
             }
         }
         if !cs.queue.backend_owned {
@@ -633,9 +639,9 @@ fn input_body(ui: &mut Ui, cs: &mut ComposerState, state: &mut UiState, commands
             .id(id)
             .frame(egui::Frame::NONE)
             .margin(egui::Margin { left: 2, right: 2, top: 0, bottom: 0 })
-            .font(theme::font(13.0))
+            .font(theme::font(14.0))
             .text_color(theme::FG)
-            .hint_text(egui::RichText::new(placeholder).font(theme::font(13.0)).color(theme::PLACEHOLDER))
+            .hint_text(egui::RichText::new(placeholder).font(theme::font(14.0)).color(theme::PLACEHOLDER))
             .desired_rows(1)
             .desired_width(f32::INFINITY);
         let out = edit.show(ui);
@@ -650,6 +656,9 @@ fn input_body(ui: &mut Ui, cs: &mut ComposerState, state: &mut UiState, commands
         {
             if !ui.ctx().text_edit_focused() {
                 out.response.request_focus();
+                // Text was put in the box for the user (a Home suggestion): the caret goes
+                // after it, not at the position the box had before.
+                set_caret(ui.ctx(), id, &state.input, state.input.len());
             }
             cs.focus_request = false;
         }
@@ -776,27 +785,21 @@ fn input_body(ui: &mut Ui, cs: &mut ComposerState, state: &mut UiState, commands
         ui.label(egui::RichText::new(format!("Enter to {enter_does} · Alt+Enter to {alt_does}")).font(theme::font(11.5)).color(theme::FG_MUTED));
     }
 
-    ui.add_space(4.0);
+    ui.add_space(8.0);
+    let _ = docked;
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
-        // Home pulls the `+` 4px into the card margin (its centering accounts for it); the
-        // docked box keeps its edge on the column.
-        if !docked {
-            ui.add_space(-4.0);
-        }
+        ui.add_space(-4.0);
         plus_menu(ui, state, commands, &ctx, id);
-        ui.add_space(2.0);
-        mode_chip(ui, cs, state, commands);
-        ui.add_space(2.0);
-        super::model_picker::show(ui, state, commands);
-        if docked {
-            ui.add_space(4.0);
-            local_chip(ui, state);
+        ui.add_space(4.0);
+        // The model menu also picks the agent (Planning or Fast) for this conversation.
+        let mode = cs.modes.get(&state.current).copied().unwrap_or(state.settings.agent_mode);
+        if let Some(m) = super::model_picker::show_with_agent(ui, state, commands, mode) {
+            set_mode(cs, state, commands, m);
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
             let ready = !state.input.trim().is_empty();
-            ui.add_space(0.0);
             let clicked = widgets::send_button(ui, state.busy, ready).clicked();
             if clicked && state.busy {
                 commands.push(AppCommand::Stop);
@@ -804,8 +807,85 @@ fn input_body(ui: &mut Ui, cs: &mut ComposerState, state: &mut UiState, commands
                 submit(cs, state, commands, alt);
             }
             soon_icon(ui, icons::MICROPHONE);
+            ui.add_space(2.0);
+            preset_chip(ui, cs, state, commands);
         });
     });
+}
+
+/// Label, icon and description of a permission preset (the terminal auto-run policy).
+pub fn preset_label(p: TerminalPolicy) -> (&'static str, &'static str, &'static str) {
+    match p {
+        TerminalPolicy::Off => (icons::HAND, "Ask", "Every command waits for your approval"),
+        TerminalPolicy::Auto => (icons::SHIELD_CHECK, "Auto", "Read-only and build commands run on their own"),
+        TerminalPolicy::Turbo => (icons::SHIELD, "Turbo", "Everything not on the denylist runs; deletions still ask"),
+    }
+}
+
+/// Permission preset chip (`Turbo ^`): which commands run without asking, for this
+/// conversation only. Deletions and denylisted commands ask or are refused whatever it says.
+fn preset_chip(ui: &mut Ui, cs: &mut ComposerState, state: &UiState, commands: &mut Vec<UiAction>) {
+    if state.settings.skip_permissions {
+        let r = widgets::pill_chip(ui, Some(icons::WARNING), "Unrestricted", false, true, false);
+        r.on_hover_text("Started with --dangerously-skip-permissions: tool calls run without asking, except deletions and denylisted commands.");
+        return;
+    }
+    let preset = cs.presets.get(&state.current).copied().unwrap_or(state.settings.terminal_policy);
+    let (icon, label, _) = preset_label(preset);
+    let r = widgets::pill_chip_up(ui, Some(icon), label, true);
+    let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&r));
+    let r = if open { r } else { r.on_hover_text("Permissions for this conversation") };
+    let mut pick = None;
+    egui::Popup::menu(&r)
+        .align(egui::RectAlign::TOP_END)
+        .align_alternatives(&[egui::RectAlign::BOTTOM_END])
+        .gap(6.0)
+        .width(300.0)
+        .frame(widgets::card(10, 4).shadow(ui.visuals().popup_shadow))
+        .show(|ui| {
+            ui.set_width(292.0);
+            ui.spacing_mut().item_spacing.y = 0.0;
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                ui.label(egui::RichText::new("Commands in this conversation").font(theme::font(11.5)).color(theme::FG_MUTED));
+            });
+            ui.add_space(4.0);
+            for p in [TerminalPolicy::Off, TerminalPolicy::Auto, TerminalPolicy::Turbo] {
+                let (icon, label, desc) = preset_label(p);
+                if option_row(ui, icon, label, desc, p == preset) {
+                    pick = Some(p);
+                    ui.close();
+                }
+            }
+            ui.add_space(2.0);
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                ui.label(egui::RichText::new("The default is in Settings > Tools and approvals.").font(theme::font(11.0)).color(theme::FG_DIM));
+            });
+            ui.add_space(4.0);
+        });
+    if let Some(p) = pick.filter(|&p| p != preset) {
+        cs.presets.insert(state.current, p);
+        commands.push(AppCommand::SetPermissionPreset(p));
+    }
+}
+
+/// A 44px popup option: icon, label, description and a check when current. Returns the click.
+fn option_row(ui: &mut Ui, icon: &str, label: &str, desc: &str, current: bool) -> bool {
+    let (rect, r) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 44.0), Sense::click());
+    let p = ui.painter();
+    if r.hovered() || current {
+        p.rect_filled(rect.shrink2(Vec2::new(2.0, 1.0)), 6, if current { theme::ROW_SELECTED } else { theme::SECONDARY });
+    }
+    p.text(egui::pos2(rect.left() + 10.0, rect.top() + 14.0), Align2::LEFT_CENTER, icon, theme::icon(14.0), theme::FG_SECONDARY);
+    p.text(egui::pos2(rect.left() + 32.0, rect.top() + 14.0), Align2::LEFT_CENTER, label, theme::font(13.0), theme::FG);
+    let dr = Rect::from_min_max(egui::pos2(rect.left() + 32.0, rect.top() + 22.0), egui::pos2(rect.right() - 26.0, rect.bottom() - 4.0));
+    widgets::paint_truncated(ui, dr, desc, theme::font(11.5), theme::FG_MUTED);
+    if current {
+        ui.painter().text(egui::pos2(rect.right() - 10.0, rect.top() + 14.0), Align2::RIGHT_CENTER, icons::CHECK, theme::icon(13.0), theme::FG);
+    }
+    r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
 }
 
 fn chip_action(cs: &mut ComposerState, act: ChipAction, commands: &mut Vec<UiAction>) {
@@ -967,61 +1047,14 @@ fn popup_list(ctx: &egui::Context, salt: &str, anchor: Rect, title: &str, rows: 
     clicked
 }
 
-/// Mode chip: Planning / Fast for this conversation.
-fn mode_chip(ui: &mut Ui, cs: &mut ComposerState, state: &UiState, commands: &mut Vec<UiAction>) {
-    let mode = cs.modes.get(&state.current).copied().unwrap_or(state.settings.agent_mode);
-    let (icon, label) = mode_label(mode);
-    let r = widgets::pill_chip(ui, Some(icon), label, true, true, false);
-    let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&r));
-    let r = if open { r } else { r.on_hover_text("Conversation mode") };
-    let mut pick = None;
-    egui::Popup::menu(&r)
-        .align(egui::RectAlign::BOTTOM_START)
-        .align_alternatives(&[egui::RectAlign::TOP_START])
-        .gap(4.0)
-        .width(280.0)
-        .frame(widgets::card(8, 4).shadow(ui.visuals().popup_shadow))
-        .show(|ui| {
-            ui.set_width(272.0);
-            ui.spacing_mut().item_spacing.y = 0.0;
-            for (m, desc) in [
-                (AgentMode::Planning, "Research, write a plan you can review, then build it"),
-                (AgentMode::Fast, "Act right away, for quick and simple tasks"),
-            ] {
-                if mode_row(ui, m, desc, m == mode) {
-                    pick = Some(m);
-                    ui.close();
-                }
-            }
-        });
-    if let Some(m) = pick.filter(|&m| m != mode) {
-        set_mode(cs, state, commands, m);
-    }
-}
-
-fn mode_label(m: AgentMode) -> (&'static str, &'static str) {
+/// Icon and name of an agent (mode), as the model menu and its chip show it.
+pub fn mode_label(m: AgentMode) -> (&'static str, &'static str) {
     match m {
         AgentMode::Planning => (icons::NOTE_PENCIL, "Planning"),
         AgentMode::Fast => (icons::LIGHTNING, "Fast"),
     }
 }
 
-fn mode_row(ui: &mut Ui, m: AgentMode, desc: &str, current: bool) -> bool {
-    let (rect, r) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 44.0), Sense::click());
-    let p = ui.painter();
-    if r.hovered() || current {
-        p.rect_filled(rect, 4, if current { theme::ROW_SELECTED } else { theme::SECONDARY });
-    }
-    let (icon, label) = mode_label(m);
-    p.text(egui::pos2(rect.left() + 8.0, rect.top() + 14.0), Align2::LEFT_CENTER, icon, theme::icon(14.0), theme::FG_SECONDARY);
-    p.text(egui::pos2(rect.left() + 30.0, rect.top() + 14.0), Align2::LEFT_CENTER, label, theme::font(13.0), theme::FG);
-    let dr = Rect::from_min_max(egui::pos2(rect.left() + 30.0, rect.top() + 22.0), egui::pos2(rect.right() - 26.0, rect.bottom() - 4.0));
-    widgets::paint_truncated(ui, dr, desc, theme::font(11.5), theme::FG_MUTED);
-    if current {
-        ui.painter().text(egui::pos2(rect.right() - 10.0, rect.top() + 14.0), Align2::RIGHT_CENTER, icons::CHECK, theme::icon(13.0), theme::FG);
-    }
-    r.clicked()
-}
 
 /// `+` button: menu with "Mention a file", "Run a workflow" and "Open folder...".
 fn plus_menu(ui: &mut Ui, state: &mut UiState, commands: &mut Vec<UiAction>, ctx: &egui::Context, input_id: egui::Id) {
@@ -1084,17 +1117,6 @@ fn soon_icon(ui: &mut Ui, icon: &str) {
     r.on_hover_text(widgets::COMING_SOON);
 }
 
-/// Bottom tray of the card (30 h, lighter fill, rounded bottom corners) with the "Local" chip.
-fn tray(ui: &mut Ui, state: &UiState) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), TRAY_H), Sense::hover());
-    let r = RADIUS - 1;
-    let fill_rect = Rect::from_min_max(rect.min + Vec2::new(1.0, 0.0), rect.max - Vec2::splat(1.0));
-    ui.painter().rect_filled(fill_rect, CornerRadius { nw: 0, ne: 0, sw: r, se: r }, TRAY_FILL);
-    let mut child = ui.new_child(
-        egui::UiBuilder::new().max_rect(rect.shrink2(Vec2::new(8.0, 3.0))).layout(egui::Layout::left_to_right(egui::Align::Center)),
-    );
-    local_chip(&mut child, state);
-}
 
 /// Workspace chip above the Home composer: folder name + caret, menu of recent workspaces.
 pub fn workspace_chip(ui: &mut Ui, state: &mut UiState, commands: &mut Vec<UiAction>) {
@@ -1164,16 +1186,6 @@ fn workspace_row(ui: &mut Ui, name: &str, path: &str, current: bool) -> bool {
     r.on_hover_text(path).clicked()
 }
 
-/// "Local" chip in the composer tray (informational; tooltip shows the workspace path).
-pub fn local_chip(ui: &mut Ui, state: &UiState) {
-    let tip = state.workspace.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "No workspace".into());
-    let (rect, r) = ui.allocate_exact_size(Vec2::new(64.0, 24.0), Sense::hover());
-    let rect = rect.translate(Vec2::new(0.0, -1.0));
-    let p = ui.painter();
-    p.text(egui::pos2(rect.left() + 6.0, rect.center().y), Align2::LEFT_CENTER, icons::DESKTOP, theme::icon(13.0), theme::FG_MUTED);
-    p.text(egui::pos2(rect.left() + 24.0, rect.center().y), Align2::LEFT_CENTER, "Local", theme::font(12.0), theme::FG_MUTED);
-    r.on_hover_text(tip);
-}
 
 #[cfg(test)]
 mod tests {

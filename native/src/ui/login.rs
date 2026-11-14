@@ -1,13 +1,13 @@
 //! Account row pinned at the bottom of the sidebar, plus the sign-in card used on Home.
 //!
 //! Both offer the Antigravity sign-in. It signs in with Antigravity's own OAuth client and needs
-//! nothing set up, while the Gemini CLI sign-in (Customizations > Account) uses gemini-cli's
+//! nothing set up, while the Gemini CLI sign-in (Settings > Account) uses gemini-cli's
 //! client and needs its secret. Offering the one that always works keeps "Sign in" meaning one
 //! thing; the Gemini CLI sign-in stays on the Account tab for whoever wants it.
 
 use egui::{Align2, Rect, Sense, Ui, Vec2};
 
-use super::{icons, theme, widgets, CustomizeTab, UiAction, UiState, View};
+use super::{icons, theme, widgets, CustomizeTab, UiAction, UiState};
 use crate::app::AppCommand;
 use crate::auth::external::{AccountProvider, AccountStatus};
 use crate::auth::AuthStatus;
@@ -21,7 +21,7 @@ pub fn provider_icon(p: AccountProvider) -> &'static str {
     }
 }
 
-/// Bottom-of-sidebar account row: who is signed in, and a gear that opens Customizations >
+/// Bottom-of-sidebar account row: who is signed in, and a gear that opens Settings >
 /// Account. A signed-in subscription account is named first (the one in use, else the first),
 /// then the Gemini CLI sign-in's Google account. Signed out it is a "Sign in" pill that starts
 /// the Antigravity sign-in.
@@ -30,9 +30,8 @@ pub fn account_row(ui: &mut Ui, state: &mut UiState, commands: &mut Vec<UiAction
     ui.add_space(4.0);
     let (rect, _) = ui.allocate_exact_size(Vec2::new(w, 36.0), Sense::hover());
     let gear = Rect::from_min_size(egui::pos2(rect.right() - 30.0, rect.center().y - 14.0), Vec2::splat(28.0));
-    if widgets::overlay_icon(ui, gear, ui.scope_id().with("gear"), icons::GEAR_SIX, "Customizations", true).clicked() {
-        state.customize_tab = CustomizeTab::Account;
-        state.navigate(View::Customizations);
+    if widgets::overlay_icon(ui, gear, ui.scope_id().with("gear"), icons::GEAR_SIX, "Settings", true).clicked() {
+        state.open_customize(CustomizeTab::Account);
     }
     let body = Rect::from_min_max(rect.min, egui::pos2(gear.left() - 6.0, rect.max.y));
     if let Some(view) = state.shown_account() {
@@ -168,7 +167,7 @@ pub fn home_notice(ui: &mut Ui, state: &mut UiState, commands: &mut Vec<UiAction
     // A usable session another Google tool saved works without any sign-in.
     if matches!(action, Action::SignIn(_)) && !has_lapsed {
         if let Some(s) = state.import_check.as_ref().and_then(|c| c.usable()) {
-            text.push_str(&format!(" Or use the existing {} from Customizations > Account.", s.issuer.session_noun()));
+            text.push_str(&format!(" Or use the existing {} from Settings > Account.", s.issuer.session_noun()));
         }
     }
     let primary = !matches!(action, Action::Cancel(_));
@@ -242,7 +241,7 @@ mod tests {
         let ctx = context();
         let mut state = UiState { auth: AuthStatus::LoggedOut, oauth_source: Some(crate::auth::ClientSource::File), ..UiState::default() };
         let mut commands = Vec::new();
-        let hint = "Or use the existing Antigravity session from Customizations > Account.";
+        let hint = "Or use the existing Antigravity session from Settings > Account.";
         let texts = painted(&ctx, Vec::new(), |ui| home_notice(ui, &mut state, &mut commands));
         assert!(!texts.iter().any(|(t, _)| t.contains(hint)), "nothing found, nothing pointed to");
         let usable = ImportSummary {
@@ -363,7 +362,7 @@ mod tests {
         let gear = texts.iter().find(|(t, _)| t == icons::GEAR_SIX).map(|(_, r)| r.center()).expect("the gear");
         painted(&ctx, vec![egui::Event::PointerMoved(gear), click(gear, true)], |ui| account_row(ui, &mut state, &mut commands));
         painted(&ctx, vec![click(gear, false)], |ui| account_row(ui, &mut state, &mut commands));
-        assert_eq!((state.view, state.customize_tab), (View::Customizations, CustomizeTab::Account));
+        assert_eq!((state.customize_open, state.customize_tab), (true, CustomizeTab::Account));
         assert!(commands.is_empty());
     }
 

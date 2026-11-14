@@ -2,8 +2,9 @@
 //! thread only drains events (`try_recv`) and sends commands, so it never blocks.
 //!
 //! [`UiState`] is a plain reducer over [`AppEvent`]s so UI logic is unit-testable without egui.
-//! Layout follows DESIGN.md: menu bar, toolbar row, fixed 256px sidebar, and a central view
-//! (`View::Chat` renders the Home composer while the conversation is empty).
+//! Layout follows DESIGN.md: menu bar, toolbar row, fixed 235px sidebar, and the screens on a
+//! rounded content card (`View::Chat` renders Home while the conversation is empty). Settings
+//! is an overlay over all of it.
 
 pub mod account_models;
 #[allow(dead_code)] // orchestration skeleton (ORCHESTRATION.md)
@@ -15,6 +16,7 @@ pub mod conversation;
 pub mod customizations;
 pub mod demo;
 pub mod format;
+pub mod git;
 pub mod history;
 pub mod home;
 pub mod icons;
@@ -23,6 +25,7 @@ pub mod markdown;
 #[allow(dead_code)] // orchestration skeleton (ORCHESTRATION.md)
 pub mod mentions;
 pub mod model_picker;
+pub mod navigator;
 pub mod progress_panel;
 #[allow(dead_code)] // orchestration skeleton (ORCHESTRATION.md)
 pub mod queue;
@@ -172,7 +175,7 @@ pub struct PendingConfirm {
     pub request: ConfirmationRequest,
 }
 
-/// One plugin as the Customizations page needs it.
+/// One plugin as the Settings card needs it.
 ///
 /// The UI keeps its own flat copy instead of holding [`crate::agent::plugins::Plugin`]: that
 /// type owns `PathBuf`s and parsed MCP documents the page never reads, and discovery runs on
@@ -211,7 +214,6 @@ pub enum View {
     #[default]
     Chat,
     History,
-    Customizations,
 }
 
 /// Screen shown in the central area; derived from [`View`] by [`UiState::screen`].
@@ -220,14 +222,13 @@ pub enum Screen {
     Home,
     Conversation,
     History,
-    Customizations,
 }
 
 /// What UI code emits each frame. Widgets push backend commands directly (DESIGN.md 6.1), so
 /// this is an alias of [`AppCommand`] rather than a separate type.
 pub type UiAction = AppCommand;
 
-/// Tabs of the Customizations page.
+/// Tabs of the Settings card.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CustomizeTab {
     #[default]
@@ -276,11 +277,14 @@ pub struct UiState {
     pub history_project: Option<PathBuf>,
     pub focus_search: bool,
     pub customize_tab: CustomizeTab,
+    /// The Settings overlay is open over the current screen (opened from the toolbar menu, the
+    /// sidebar row or a banner link). Not a [`View`]: the screen underneath keeps its state.
+    pub customize_open: bool,
     /// Conversation awaiting an inline delete confirmation.
     pub confirm_delete: Option<Uuid>,
     /// How many trailing items are shown (grows by [`ITEM_PAGE`]).
     pub visible_items: usize,
-    /// Settings edited on the Customizations page but not yet sent.
+    /// Settings edited on the Settings card but not yet sent.
     pub settings_dirty: bool,
     /// What `settings` was edited from: the last backend copy, or the last copy sent. A field
     /// that differs from it is an edit not sent yet ([`UiState::apply`] keeps those).
@@ -294,6 +298,15 @@ pub struct UiState {
     pub last_usage: Option<UsageMetadata>,
     /// Conversation whose turn is running (sidebar spinner).
     pub running: Option<Uuid>,
+    /// Conversations whose last turn ended while they were not on screen (sidebar dot).
+    pub unread: HashSet<Uuid>,
+    /// When each prompt of the open conversation was sent, by user bubble index (navigator).
+    pub prompt_times: std::collections::BTreeMap<usize, chrono::DateTime<chrono::Utc>>,
+    /// Projects whose sidebar list shows every conversation ("See all").
+    pub expanded_projects: HashSet<Option<PathBuf>>,
+    /// The sidebar is drawn this frame: open, and not pushed out by a side panel in a narrow
+    /// window (see [`UiState::toggle_sidebar`]).
+    pub sidebar_shown: bool,
 
     /// Where the OAuth client secret came from (never the value itself).
     pub oauth_source: Option<crate::auth::ClientSource>,
@@ -307,7 +320,7 @@ pub struct UiState {
     /// `AgentEvent::TaskUpdate`s of this session, used to refine the task group cards
     /// ([`taskgroups::apply_updates`]).
     pub task_updates: Vec<taskgroups::TaskUpdate>,
-    /// Discovered plugins, shown in Customizations. Empty until the backend reports them.
+    /// Discovered plugins, shown in Settings. Empty until the backend reports them.
     pub plugins: Vec<PluginRow>,
     /// MCP servers as `(name, connected, tool_count)`, from the hub's `statuses()`.
     pub mcp_status: Vec<(String, bool, usize)>,
@@ -376,6 +389,7 @@ impl Default for UiState {
             history_project: None,
             focus_search: false,
             customize_tab: CustomizeTab::General,
+            customize_open: false,
             confirm_delete: None,
             visible_items: ITEM_PAGE,
             settings_dirty: false,
@@ -384,6 +398,10 @@ impl Default for UiState {
             turn_started: None,
             last_usage: None,
             running: None,
+            unread: HashSet::new(),
+            prompt_times: std::collections::BTreeMap::new(),
+            expanded_projects: HashSet::new(),
+            sidebar_shown: true,
             oauth_source: None,
             secret_input: String::new(),
             open_model_menu: false,
@@ -498,6 +516,7 @@ impl UiState {
                     self.running = Some(c.id);
                 } else {
                     self.items = items_from_history(&c.messages);
+                    self.prompt_times = c.prompt_times.clone();
                     self.expanded.clear();
                     self.visible_items = ITEM_PAGE;
                     self.banner = None;
@@ -635,12 +654,18 @@ impl UiState {
             }
             AppEvent::Agent(a) => {
                 self.awaiting_turn = false;
+                if matches!(a, AgentEvent::Finished { .. }) && !self.on_conversation() {
+                    self.unread.extend(self.current);
+                }
                 self.apply_agent(a)
             }
             AppEvent::TurnEvent { conversation, event } => {
                 self.awaiting_turn = false;
                 let finished = matches!(event, AgentEvent::Finished { .. });
                 self.running = if finished { None } else { Some(conversation) };
+                if finished && !(self.current == Some(conversation) && self.on_conversation()) {
+                    self.unread.insert(conversation);
+                }
                 if self.current == Some(conversation) {
                     self.apply_agent(event);
                 } else if finished {
@@ -703,7 +728,10 @@ impl UiState {
                 }
             }
             AgentEvent::Notify(t) => self.items.push(ChatItem::Notice(t)),
-            AgentEvent::SteerInjected(t) => self.items.push(ChatItem::User(t)),
+            AgentEvent::SteerInjected(t) => {
+                self.note_prompt_time();
+                self.items.push(ChatItem::User(t))
+            }
             AgentEvent::Compacted { removed, .. } => {
                 self.items.push(ChatItem::Notice(format!("Condensed {removed} older messages into a summary.")))
             }
@@ -759,6 +787,7 @@ impl UiState {
             return None;
         }
         self.input.clear();
+        self.note_prompt_time();
         self.items.push(ChatItem::User(text.clone()));
         // Updates of the previous turn are settled by the transcript from here on.
         self.task_updates.retain(|u| u.turn >= taskgroups::turn_of(&self.items));
@@ -788,11 +817,18 @@ impl UiState {
         }
     }
 
+    /// The user bubble about to be pushed was sent now (navigator hover card).
+    fn note_prompt_time(&mut self) {
+        let index = self.items.iter().filter(|i| matches!(i, ChatItem::User(_))).count();
+        self.prompt_times.insert(index, chrono::Utc::now());
+    }
+
     /// Reset the chat pane for a new conversation.
     pub fn new_chat(&mut self) {
         self.current = None;
         self.current_title.clear();
         self.items.clear();
+        self.prompt_times.clear();
         self.task_updates.clear();
         self.expanded.clear();
         self.visible_items = ITEM_PAGE;
@@ -806,8 +842,12 @@ impl UiState {
             View::Chat if self.is_home() => Screen::Home,
             View::Chat => Screen::Conversation,
             View::History => Screen::History,
-            View::Customizations => Screen::Customizations,
         }
+    }
+
+    /// The conversation is on screen: the Chat view with no Settings overlay over it.
+    pub fn on_conversation(&self) -> bool {
+        self.view == View::Chat && !self.customize_open
     }
 
     /// The Chat view shows the Home composer (no transcript yet).
@@ -823,6 +863,29 @@ impl UiState {
             self.forward.clear();
             self.view = v;
         }
+        self.customize_open = false;
+        self.mark_seen();
+    }
+
+    /// Open the Settings overlay on `tab`, over whatever screen is showing.
+    pub fn open_customize(&mut self, tab: CustomizeTab) {
+        // A provider dialog opened from another tab must not draw on this one (the Providers tab
+        // draws its own when it is open there).
+        if self.customize_open && self.customize_tab != tab {
+            self.bypass_dialog = false;
+        }
+        self.customize_tab = tab;
+        self.customize_open = true;
+    }
+
+    /// Close the Settings overlay. A provider dialog it opened goes with it.
+    pub fn close_customize(&mut self) {
+        self.customize_open = false;
+        self.bypass_dialog = false;
+        self.provider_dialog = None;
+        // The conversation behind is on screen again: a turn that ended under the overlay is
+        // seen, and its unread dot goes.
+        self.mark_seen();
     }
 
     pub fn go_back(&mut self) {
@@ -830,6 +893,7 @@ impl UiState {
             self.forward.push(self.view);
             self.view = v;
         }
+        self.mark_seen();
     }
 
     pub fn go_forward(&mut self) {
@@ -837,6 +901,44 @@ impl UiState {
             self.back.push(self.view);
             self.view = v;
         }
+        self.mark_seen();
+    }
+
+    /// The open conversation is on screen: its last turn is no longer unread.
+    fn mark_seen(&mut self) {
+        if self.on_conversation() {
+            if let Some(id) = self.current {
+                self.unread.remove(&id);
+            }
+        }
+    }
+
+    /// The sidebar button and Ctrl+B. In a window narrower than [`theme::NARROW_WINDOW`] an open
+    /// side panel pushes the sidebar out, so there the button closes the side panel instead,
+    /// which brings the sidebar back.
+    pub fn toggle_sidebar(&mut self, ctx: &egui::Context) {
+        // The sidebar is hidden because a side panel took its room (narrow window): one press
+        // closes that panel and shows the sidebar, rather than flipping a flag nothing draws.
+        let side_panel_holds_the_room = !self.sidebar_open && self.screen() == Screen::Conversation
+            && (self.progress_open || artifacts_panel::load(ctx, self.current).open);
+        if !self.sidebar_shown && (self.sidebar_open || side_panel_holds_the_room) {
+            self.progress_open = false;
+            let mut panel = artifacts_panel::load(ctx, self.current);
+            panel.open = false;
+            artifacts_panel::store(ctx, self.current, panel);
+            self.sidebar_open = true;
+            self.sidebar_shown = true;
+            return;
+        }
+        self.sidebar_open = !self.sidebar_open;
+    }
+
+    /// Whether the sidebar fits this frame: a side panel in a narrow window takes its room.
+    pub fn update_sidebar_shown(&mut self, ctx: &egui::Context) {
+        let narrow = ctx.content_rect().width() < theme::NARROW_WINDOW;
+        let side_panel =
+            self.screen() == Screen::Conversation && (self.progress_open || artifacts_panel::load(ctx, self.current).open);
+        self.sidebar_shown = self.sidebar_open && !(narrow && side_panel);
     }
 
     /// Toggle membership of `key` in [`Self::expanded`].
@@ -980,10 +1082,11 @@ impl AntiCraftApp {
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context, commands: &mut Vec<UiAction>) {
-        let (new, side) = ctx.input_mut(|i| {
+        let (new, side, settings) = ctx.input_mut(|i| {
             (
                 i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::N)),
                 i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::B)),
+                i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::Comma)),
             )
         });
         if new && !self.state.busy {
@@ -991,7 +1094,15 @@ impl AntiCraftApp {
             commands.push(AppCommand::NewChat);
         }
         if side {
-            self.state.sidebar_open = !self.state.sidebar_open;
+            self.state.toggle_sidebar(ctx);
+        }
+        // Ctrl+, opens Settings and closes it again.
+        if settings {
+            if self.state.customize_open {
+                self.state.close_customize();
+            } else {
+                self.state.open_customize(self.state.customize_tab);
+            }
         }
     }
 
@@ -1045,6 +1156,20 @@ pub fn sanitize_injected_keys(events: &mut Vec<egui::Event>) {
     });
 }
 
+/// The rounded card a screen sits on: card fill and outline, then the screen in a child ui
+/// clipped to the inside of the outline. Screens leave the corners unfilled (their panels
+/// have no fill of their own), so the rounding shows.
+pub(crate) fn shell_card<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let card = ui.max_rect();
+    ui.painter().rect(card, theme::RADIUS_SHELL, theme::BG, egui::Stroke::new(1.0, theme::EDGE), egui::StrokeKind::Inside);
+    let inner = card.shrink(1.0);
+    ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| {
+        ui.set_clip_rect(inner.intersect(ui.clip_rect()));
+        add(ui)
+    })
+    .inner
+}
+
 impl eframe::App for AntiCraftApp {
     /// Input order trace (debug builds, `ANTICRAFT_KEYTRACE=1`) and the injected-key filter.
     /// The trace records typed text, so it never exists in release builds.
@@ -1070,26 +1195,35 @@ impl eframe::App for AntiCraftApp {
         self.shortcuts(&ctx, &mut commands);
         let state = &mut self.state;
 
+        theme::set_appearance(&ctx, &state.settings.appearance);
+        state.update_sidebar_shown(&ctx);
+
+        // The menu bar, toolbar row and sidebar share one background; the screens sit on it as
+        // a rounded card (DESIGN.md 2.0).
         egui::Panel::top("titlebar")
             .exact_size(theme::TOP_BAR_HEIGHT + theme::TOOLBAR_HEIGHT)
             .show_separator_line(false)
-            .frame(egui::Frame::NONE.fill(theme::BG))
+            .frame(egui::Frame::NONE.fill(theme::SIDEBAR))
             .show(ui, |ui| titlebar::show(ui, state, &mut commands));
-        if state.sidebar_open {
+        if state.sidebar_shown {
             egui::Panel::left("sidebar")
                 .exact_size(theme::SIDEBAR_WIDTH)
                 .resizable(false)
                 .show_separator_line(false)
-                .frame(egui::Frame::NONE.fill(theme::SIDEBAR).inner_margin(egui::Margin { left: 8, right: 8, top: 8, bottom: 8 }))
+                .frame(egui::Frame::NONE.fill(theme::SIDEBAR).inner_margin(egui::Margin { left: 8, right: 8, top: 0, bottom: 8 }))
                 .show(ui, |ui| sidebar::show(ui, state, &mut commands));
         }
         let md_cache = &mut self.md_cache;
-        egui::CentralPanel::default().frame(egui::Frame::NONE.fill(theme::BG)).show(ui, |ui| match state.screen() {
-            Screen::Home => home::show(ui, state, &mut commands),
-            Screen::Conversation => conversation::show(ui, state, md_cache, &mut commands),
-            Screen::History => history::show(ui, state, &mut commands),
-            Screen::Customizations => customizations::show(ui, state, &mut commands),
+        let g = theme::SHELL_GUTTER;
+        let margin = egui::Margin { left: if state.sidebar_shown { 0 } else { g }, right: g, top: 0, bottom: g };
+        egui::CentralPanel::default().frame(egui::Frame::NONE.fill(theme::SIDEBAR).inner_margin(margin)).show(ui, |ui| {
+            shell_card(ui, |ui| match state.screen() {
+                Screen::Home => home::show(ui, state, &mut commands),
+                Screen::Conversation => conversation::show(ui, state, md_cache, &mut commands),
+                Screen::History => history::show(ui, state, &mut commands),
+            })
         });
+        customizations::overlay(&ctx, state, &mut commands);
 
         // Customizations apply immediately, but drags and text edits are flushed only once
         // the pointer is released and no text field is focused, so the file is not rewritten
@@ -1295,13 +1429,15 @@ mod tests {
 
     #[test]
     fn a_backend_started_prompt_does_not_leave_the_page_the_user_is_on() {
-        // A queued message starts while the user types in a Customizations field.
+        // A queued message starts while the user types in a Settings field.
         let mut s = UiState::default();
         let id = Uuid::new_v4();
         s.current = Some(id);
-        s.navigate(View::Customizations);
+        s.open_customize(CustomizeTab::Agent);
         s.apply(AppEvent::PromptStarted { conversation: id, text: "queued one".into() });
-        assert_eq!(s.view, View::Customizations);
+        assert!(s.customize_open);
+        assert_eq!(s.customize_tab, CustomizeTab::Agent);
+        assert_eq!(s.view, View::Chat);
         assert!(s.busy);
         assert_eq!(s.items[0], ChatItem::User("queued one".into()));
     }
@@ -1500,6 +1636,40 @@ mod tests {
         assert_eq!(s.input, "draft", "the composer draft is kept");
     }
 
+    /// Settings is an overlay: opening it leaves the view, switching tabs sends no dialog along,
+    /// and navigation or a close puts it away without touching the back stack.
+    #[test]
+    fn settings_opens_over_the_current_screen_and_closes_on_navigation() {
+        let mut s = UiState::default();
+        s.navigate(View::History);
+        s.open_customize(CustomizeTab::Providers);
+        assert_eq!((s.view, s.customize_open, s.customize_tab), (View::History, true, CustomizeTab::Providers));
+        assert_eq!(s.screen(), Screen::History, "the screen underneath stays");
+        s.open_customize(CustomizeTab::Account);
+        assert_eq!(s.customize_tab, CustomizeTab::Account);
+        s.navigate(View::Chat);
+        assert!(!s.customize_open);
+        assert_eq!(s.back, vec![View::Chat, View::History]);        s.open_customize(CustomizeTab::General);
+        s.close_customize();
+        assert!(!s.customize_open);
+    }
+
+    /// A turn that ends while the overlay covers the conversation leaves it unread.
+    #[test]
+    fn a_turn_ending_behind_the_settings_overlay_is_unread() {
+        let mut s = UiState::default();
+        let id = Uuid::new_v4();
+        s.current = Some(id);
+        s.apply(AppEvent::Agent(AgentEvent::Usage(UsageMetadata::default())));
+        assert!(!s.unread.contains(&id));
+        s.open_customize(CustomizeTab::General);
+        s.apply(AppEvent::Agent(AgentEvent::Finished { reason: FinishReason::Completed, history: Vec::new() }));
+        assert!(s.unread.contains(&id), "the conversation was covered");
+        s.close_customize();
+        s.navigate(View::Chat);
+        assert!(!s.unread.contains(&id), "shown again, it is seen");
+    }
+
     #[test]
     fn usage_is_kept() {
         let mut s = UiState::default();
@@ -1512,15 +1682,14 @@ mod tests {
     fn navigation_stack() {
         let mut s = UiState::default();
         s.navigate(View::History);
-        s.navigate(View::Customizations);
         s.go_back();
-        assert_eq!(s.view, View::History);
+        assert_eq!(s.view, View::Chat);
         s.go_forward();
-        assert_eq!(s.view, View::Customizations);
+        assert_eq!(s.view, View::History);
         s.go_back();
-        s.navigate(View::Chat);
-        assert!(s.forward.is_empty());
-        assert_eq!(s.back, vec![View::Chat, View::History]);
+        s.navigate(View::History);
+        assert!(s.forward.is_empty(), "a new navigation drops the forward stack");
+        assert_eq!(s.back, vec![View::Chat]);
     }
 
     #[test]

@@ -13,19 +13,24 @@ Tests use mock servers only. Set `ANTICRAFT_LOG=debug` for more logging.
 ## OAuth client secret
 The Antigravity sign-in uses Antigravity's own OAuth client. The exe on the Releases page has it built in, so there is nothing to set. The client's secret is not in the source: when you build it yourself, set `ANTICRAFT_ANTIGRAVITY_CLIENT_SECRET`, or write the line `ANTICRAFT_ANTIGRAVITY_CLIENT_SECRET=value` into `native/antigravity-client.local.env` (git ignores that file; after creating it, touch `native/build.rs` so the build reads it). Without it the build still runs, and only the Antigravity sign-in reports an error.
 
-Only the Gemini CLI sign-in (Customizations > Account > "Gemini CLI sign-in (Google)") needs the gemini-cli public installed-app client secret. Set it either way:
-- In the app: Customizations > Account, type it into "Client secret" and press Save (or Enter). It is stored in `oauth_client.json` in the data folder with an owner-only DACL. Clear removes it. The field's undo history is dropped after saving.
+Only the Gemini CLI sign-in (Settings > Account > "Gemini CLI sign-in (Google)") needs the gemini-cli public installed-app client secret. Set it either way:
+- In the app: Settings > Account, type it into "Client secret" and press Save (or Enter). It is stored in `oauth_client.json` in the data folder with an owner-only DACL. Clear removes it. The field's undo history is dropped after saving.
 - The `ANTICRAFT_OAUTH_CLIENT_SECRET` environment variable, at run time or build time.
 
 Precedence: saved file, then run-time env, then build-time value. The value is never logged or shown again.
 
 ## UI overview
-- Top bar: back/forward, conversation title (click to rename, Esc cancels), `...` menu with Rename, Copy as Markdown and Delete (two clicks, disabled while a turn runs).
-- Sidebar: Conversation History, Customizations, conversations grouped by project, account row at the bottom.
-- Home: centered composer. Conversation: reading column with markdown, code blocks, tool-call cards, "Worked for ..." turn headers, and a docked composer with the model picker and Stop.
-- Tool confirmations appear inline in the transcript (diff or command preview) with Approve / Reject / Always allow in the composer. Enter approves and Esc rejects, unless a menu is open.
+The layout follows the Antigravity 2.31 desktop window; DESIGN.md has the details.
+- Window: the menu bar, toolbar and sidebar share one background, and the screens sit on it as a darker rounded card.
+- Toolbar: sidebar toggle, back/forward, search (Conversation History), the breadcrumb "Project / Title" (click the title to rename, Esc cancels), the Progress and Artifacts panel toggles, "Open IDE" (opens the workspace in VS Code, else Explorer) and a `...` menu with Rename, Copy as Markdown and Delete (two clicks, disabled while a turn runs).
+- Sidebar: New Conversation, conversations grouped by project (5 per project, then "See all"), with a spinner while a conversation works, an amber dot while it waits for you and a blue dot when it finished unseen. Settings sits at the bottom once an account is signed in. Below 1024 px of width, an open side panel hides the sidebar.
+- Home: a greeting with starter suggestions (they fill the box, never send), the project picker with its Git branch, and the message box pinned to the bottom.
+- Conversation: a reading column (768 px, 960 px or the full width) with markdown, code blocks, quiet tool rows and "Worked for ..." turn headers; a navigator rail on its left edge with a dot per turn (hover for the prompt, the reply and the time; click to jump; chapters by day); the docked message box with Stop.
+- Message box: `+`, the model chip (which also names the agent mode, Planning or Fast, chosen at the top of its menu), the per-conversation permission chip (Ask, Auto or Turbo for shell commands), and send.
+- Tool confirmations appear inline in the transcript (diff or command preview) with Approve / Reject / Always allow in the message box. Enter approves and Esc rejects, unless a menu is open.
 - Under the last answer: Copy and "Send again" (re-sends the last question as a new turn).
 - The model chip is always the model the next turn uses, including after opening an older conversation.
+- Settings opens as a card over the current screen (sidebar Settings row, AntiCraft or File menu, Ctrl+,) with sections on the left and a search field; Esc closes it. Appearance sets the conversation width, the font (System UI, Inter or Google Sans, when installed; fonts are never bundled) and the text size (12, 14 or 16 px).
 - Icons come from the Phosphor icon font (MIT).
 
 ## Demo and screenshots
@@ -43,7 +48,7 @@ With `--screenshot` the app saves a PNG and exits. The pictures in the repositor
 2. If the port is busy or the browser cannot come back, paste the address the browser landed on into "Paste redirect link" on the Antigravity row. The state is checked the same way.
 3. The account refreshes its own tokens and sends your turns.
 
-The Gemini CLI sign-in (Customizations > Account > "Gemini CLI sign-in (Google)") is the older path through gemini-cli's OAuth client. It needs the client secret above:
+The Gemini CLI sign-in (Settings > Account > "Gemini CLI sign-in (Google)") is the older path through gemini-cli's OAuth client. It needs the client secret above:
 1. Click its "Sign in". Your browser opens Google consent (PKCE plus a random state).
 2. Google redirects to `http://127.0.0.1:<port>/oauth2callback`. The app keeps accepting connections until a request with the exact path and the matching state arrives. Preconnects, favicon requests and forged states are ignored. Set `OAUTH_CALLBACK_PORT` to pin the port.
 3. Tokens are stored, verified at the next start and refreshed before they expire. A 401 forces one refresh and a retry. `invalid_grant` asks you to log in again.
@@ -59,7 +64,7 @@ The Gemini CLI sign-in (Customizations > Account > "Gemini CLI sign-in (Google)"
 The dropdown offers `auto`, Pro, Flash and Flash-lite IDs. `auto`/`pro` resolve to `gemini-3-pro-preview` when "preview access" is on, otherwise to `gemini-2.5-pro`. `gemini-3.5-flash` is sent as `gemini-3-flash`, or as `gemini-3.8-flash` when "latest Flash GA" is on (PROTOCOL 3.11). Retryable errors (429 with RetryInfo, 5xx, network) are retried with backoff while nothing has been shown yet.
 
 ## Bypass Mode
-Customizations > Tools and approvals > Bypass Mode sends the **first requests of each message** to a provider profile you choose, then the conversation returns to the model in use. The count is configurable (1-50). Tools, history and approvals are unchanged.
+Settings > Tools and approvals > Bypass Mode sends the **first requests of each message** to a provider profile you choose, then the conversation returns to the model in use. The count is configurable (1-50). Tools, history and approvals are unchanged.
 
 - Pick the profile under "Bypass provider"; a new one can be added right there.
 - "Instruction files" takes `.md` files. Their text is added to the system instruction of the requests that go to that provider only: never to the conversation history, and never to the normal model.
@@ -70,7 +75,7 @@ Customizations > Tools and approvals > Bypass Mode sends the **first requests of
 `%APPDATA%\AntiCraft\native\` (override with `--data-dir`):
 - `oauth_creds.json`: the Gemini CLI sign-in's tokens. The file is created with a protected DACL for the current user's SID only (mode 0600 on unix). A newly created data folder also gets an owner-only, inheritable DACL (an existing `--data-dir` keeps its ACL).
 - `accounts\{id}.json`: one file per subscription account (Antigravity, Codex, Claude Code), owner-only as well.
-- `oauth_client.json`: the client secret entered in Customizations.
+- `oauth_client.json`: the client secret entered in Settings.
 - `settings.json`
 - `conversations\{id}.json`
 - `logs\native.log`: never contains tokens.
@@ -89,8 +94,8 @@ This app calls the **non-public** Code Assist API (`cloudcode-pa.googleapis.com/
 - The unix code paths compile by design but are only tested on Windows.
 
 ## Subscription accounts
-Customizations > Account > Accounts signs in with a subscription instead of an API key: Antigravity (a Google account, through Antigravity's own OAuth client), ChatGPT Codex and Claude Code. Each signed-in account lists its models (Models shows which ones it serves and checks again on request), can be put in use for turns, and is signed out of on its own row. The composer's model picker switches between accounts and their models.
+Settings > Account > Accounts signs in with a subscription instead of an API key: Antigravity (a Google account, through Antigravity's own OAuth client), ChatGPT Codex and Claude Code. Each signed-in account lists its models (Models shows which ones it serves and checks again on request), can be put in use for turns, and is signed out of on its own row. The message box's model menu switches between accounts and their models.
 
-These are consumer subscription sign-ins. The providers may restrict third-party clients: a refused request appears on the row, and an API key on the Providers tab is the alternative. Using a subscription this way may violate that provider's terms and put the account at risk.
+These are consumer subscription sign-ins. The providers may restrict third-party clients: a refused request appears on the row, and an API key in Settings > Providers is the alternative. Using a subscription this way may violate that provider's terms and put the account at risk.
 
 AntiCraft sends its own identity (`User-Agent: anticraft-native/...`) and does not pose as the official clients. The one exception is the system line `You are Claude Code, Anthropic's official CLI for Claude.` on Claude's OAuth path, because Anthropic's endpoint refuses inference for these tokens without it; the official CLI's User-Agent, billing header and request signing are not sent. Tokens live only in `accounts\{id}.json` (owner-only) and never reach a log, a URL or the UI. Nothing is written to `~/.gemini`, `~/.codex` or `~/.claude`. `--logout` removes only the Gemini CLI sign-in; sign out of an account on its row.
